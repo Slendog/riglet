@@ -121,6 +121,19 @@ impl Affine {
     fn vector(self, v: Vec2) -> Vec2 {
         [self.m[0][0] * v[0] + self.m[1][0] * v[1], self.m[0][1] * v[0] + self.m[1][1] * v[1]]
     }
+
+    fn inverse(self) -> Option<Affine> {
+        let [[a, b], [c, d], [tx, ty]] = self.m;
+        let det = a * d - b * c;
+        if det.abs() < 1e-12 || !det.is_finite() {
+            return None;
+        }
+        let x = [d / det, -b / det];
+        let y = [-c / det, a / det];
+        let inv = Affine { m: [x, y, [0.0, 0.0]] };
+        let t = inv.vector([tx, ty]);
+        Some(Affine { m: [x, y, [-t[0], -t[1]]] })
+    }
 }
 
 // ---------- state ----------
@@ -158,8 +171,29 @@ struct ParamInfo {
 /// (masked node id, is composite, sources by uuid).
 type PendingMask = (Id, bool, Vec<(u32, MaskMode)>);
 
-/// (json, parent frame, accumulated zSort, mesh-group bake, parent uuid).
-type WalkItem<'v> = (&'v Value, Id, f32, Option<Affine>, Option<u32>);
+/// (json, parent frame, accumulated zSort, mesh-group bake, parent uuid,
+/// MeshGroup reach).
+type WalkItem<'v> = (&'v Value, Id, f32, Option<Affine>, Option<u32>, Option<Reach>);
+
+/// How the nearest MeshGroup reaches a node. Inochi2D's `MeshGroup.setGroup`
+/// filters a child and recurses only through drawables and composites with
+/// `propagate_meshgroup`; any other node is "blocked": not deformed (with
+/// `translate_children`, only its translation moves), and its subtree isn't
+/// reached at all, not even by outer MeshGroups.
+#[derive(Debug, Clone)]
+struct Reach {
+    /// A frame with the same coordinates as the current one but outside
+    /// every reaching mesh deformer, once `chain` is replicated under it.
+    outside: Id,
+    /// Rotation deformers created inside the mesh deformers since `outside`;
+    /// a blocked node is placed under rigid copies of them ("twins").
+    chain: Vec<Id>,
+    translate_children: bool,
+    /// A node on the way is hidden (its visibility must carry over).
+    hidden: bool,
+    /// The reaching MeshGroup's mesh deformer, when it is not dynamic.
+    static_mesh: Option<Id>,
+}
 
 struct Importer<'a> {
     limits: &'a Limits,
@@ -177,7 +211,16 @@ struct Importer<'a> {
     mask_thresholds: HashMap<u32, f32>,
     /// Nodes whose transform is animated (need a rotation deformer).
     animated_transform: HashSet<u32>,
+    /// Nodes with deform bindings.
+    deformed: HashSet<u32>,
     placeholder: HashMap<&'static str, Id>,
+    /// (rotation deformer, its rigid twin outside the mesh deformers): the
+    /// twin gets a copy of the original's keyform sets after the bindings.
+    twins: Vec<(Id, Id)>,
+    /// Per mesh deformer: the bake of its MeshGroup (Riglet coordinates =
+    /// bake applied to the MeshGroup's local coordinates).
+    mesh_bakes: HashMap<Id, Affine>,
+    static_deform_warned: HashSet<Id>,
 }
 
 fn warn(warnings: &mut Vec<ConversionWarning>, code: &str, object: Option<&str>, message: impl Into<String>) {
@@ -381,8 +424,8 @@ impl Importer<'_> {
             masks: None,
             rest: GroupRest { opacity: 1.0, draw_order: None },
         }))?;
-        let mut stack: Vec<WalkItem> = vec![(root, "root".into(), 0.0, None, None)];
-        while let Some((v, frame, acc, bake, parent_uuid)) = stack.pop() {
+        let mut stack: Vec<WalkItem> = vec![(root, "root".into(), 0.0, None, None, None)];
+        while let Some((v, frame, acc, bake, parent_uuid, reach)) = stack.pop() {
             let Some(uuid) = uuid(v, "uuid") else {
                 self.warn("NODE_INVALID", None, "node without a uuid skipped (with its subtree)");
                 continue;
@@ -434,19 +477,68 @@ impl Importer<'_> {
             let animated = self.animated_transform.contains(&uuid);
             let mut m = Mapped { ty: ty.clone(), ..Default::default() };
 
+            // MeshGroup reach (see `Reach`). A blocked node without
+            // translate_children moves outside the mesh deformers (exact);
+            // with it, it gets a rigid rotation deformer inside them.
+            let propagates = matches!(ty.as_str(), "Part" | "Mask" | "MeshGroup")
+                || (ty == "Composite" && flag(v, "propagate_meshgroup", false));
+            let (frame, visible, reached, translated) = match &reach {
+                Some(r) if !propagates && r.translate_children => (frame, visible, false, true),
+                Some(r) if !propagates => (self.outside_frame(r)?, visible && !r.hidden, false, false),
+                Some(_) => (frame, visible, true, false),
+                None => (frame, visible, false, false),
+            };
+
+            if reached
+                && self.deformed.contains(&uuid)
+                && let Some(mesh) = reach.as_ref().and_then(|r| r.static_mesh.clone())
+                && self.static_deform_warned.insert(mesh.clone())
+            {
+                self.warn(
+                    "MESHGROUP_DEFORM_APPROXIMATED",
+                    Some(&mesh),
+                    "a MeshGroup without dynamic_deformation adds its children's own deformation after its map; \
+                     Riglet maps the deformed positions (E6)",
+                );
+            }
+
             // Under a MeshGroup, static transforms are baked into vertices
             // (exact); animated ones need a rigid rotation deformer.
+            let mut created: Vec<Id> = Vec::new();
             let (frame, bake) = match bake {
-                Some(outer) if !animated => (frame, Some(outer.then(Affine::trs([t[0], t[1]], r[2], s)))),
-                Some(_) => {
-                    self.warn(
-                        "MESHGROUP_TRANSFORM_APPROXIMATED",
-                        Some(&id),
-                        "an animated transform under a MeshGroup is mapped rigidly; Inochi2D deforms each vertex",
-                    );
+                Some(outer) if !animated && !translated => {
+                    (frame, Some(outer.then(Affine::trs([t[0], t[1]], r[2], s))))
+                }
+                Some(outer) => {
+                    if translated {
+                        self.warn(
+                            "MESHGROUP_TRANSLATE_APPROXIMATED",
+                            Some(&id),
+                            "Inochi2D's MeshGroup only translates this node (translate_children); Riglet also \
+                             rotates and scales it with the mesh around its origin",
+                        );
+                    } else if reached {
+                        self.warn(
+                            "MESHGROUP_TRANSFORM_APPROXIMATED",
+                            Some(&id),
+                            "an animated transform under a MeshGroup is mapped rigidly; Inochi2D deforms each vertex",
+                        );
+                    }
+                    // The baked static ancestors become one static rotation
+                    // deformer, so this transform and its bindings stay in
+                    // their own local frame.
+                    let parent = if outer == Affine::IDENTITY {
+                        frame
+                    } else {
+                        let bid = format!("{id}:bake");
+                        self.bake_frame(&bid, &name, &frame, outer)?;
+                        created.push(bid.clone());
+                        bid
+                    };
                     let rid = format!("{id}:transform");
-                    self.rotation(&rid, &name, &frame, visible, t, r[2], s)?;
+                    self.rotation(&rid, &name, &parent, visible, t, r[2], s)?;
                     m.transform = Some(rid.clone());
+                    created.push(rid.clone());
                     (rid, Some(Affine::IDENTITY))
                 }
                 None if identity && !animated => (frame, None),
@@ -465,6 +557,16 @@ impl Importer<'_> {
                 v.get("children").and_then(Value::as_array).map(|a| a.iter().collect()).unwrap_or_default();
             let child_frame;
             let mut child_bake = bake;
+            // Reached nodes pass the reach on (blocked ones end it).
+            let mut child_reach = match &reach {
+                Some(r) if reached => {
+                    let mut r = r.clone();
+                    r.chain.extend(created.iter().cloned());
+                    r.hidden |= !visible;
+                    Some(r)
+                }
+                _ => None,
+            };
             match ty.as_str() {
                 "Part" | "Mask" => {
                     let has_children = !children.is_empty();
@@ -550,15 +652,33 @@ impl Importer<'_> {
                         self.warn(
                             "MESHGROUP_DYNAMIC_APPROXIMATED",
                             Some(&id),
-                            "dynamic_deformation MeshGroup mapped as static",
+                            "dynamic_deformation: Inochi2D looks every deformed vertex up again each frame; Riglet \
+                             binds vertices to triangles at rest (E6)",
                         );
                     }
                     let mid = if m.transform.is_some() { format!("{id}:mesh") } else { id.clone() };
                     if let Some(count) = self.mesh_deformer(v, &mid, &name, &frame, inner_visible, bake)? {
                         m.mesh_deformer = Some(mid.clone());
                         m.vertex_count = count;
+                        // Children are in the MeshGroup's local frame: the
+                        // same bake as its own mesh (identity unless it is
+                        // a static transform under another MeshGroup).
+                        child_bake = Some(bake.unwrap_or(Affine::IDENTITY));
+                        let (outside, mut chain) = match (&reach, reached) {
+                            (Some(r), true) => (r.outside.clone(), r.chain.clone()),
+                            _ => (frame.clone(), Vec::new()),
+                        };
+                        if reached {
+                            chain.extend(created.iter().cloned());
+                        }
+                        child_reach = Some(Reach {
+                            outside,
+                            chain,
+                            translate_children: flag(v, "translate_children", false),
+                            hidden: reach.as_ref().is_some_and(|r| reached && r.hidden) || !visible,
+                            static_mesh: (!flag(v, "dynamic_deformation", false)).then(|| mid.clone()),
+                        });
                         child_frame = mid;
-                        child_bake = Some(Affine::IDENTITY);
                     } else {
                         self.group(&mid, &name, &frame, inner_visible)?;
                         child_frame = mid;
@@ -595,15 +715,18 @@ impl Importer<'_> {
             self.mapped.insert(uuid, m);
             // Push children in reverse so they pop in file order.
             for c in children.iter().rev() {
-                stack.push((c, child_frame.clone(), acc, child_bake, Some(uuid)));
+                stack.push((c, child_frame.clone(), acc, child_bake, Some(uuid), child_reach.clone()));
             }
         }
         Ok(())
     }
 
-    /// Inochi2D leaves child points outside a MeshGroup's mesh undeformed;
-    /// Riglet extrapolates from the nearest triangle (E6). Warn once per
-    /// MeshGroup that has such points.
+    /// Inochi2D looks a point up in a rest-pose bitmask: the cell of
+    /// `floor(p)` holds the triangle containing that integer corner (the
+    /// highest index wins), and a point outside the rest bounds or in an
+    /// empty cell stays undeformed. Riglet binds every point (E6) and
+    /// extrapolates. Warn once per MeshGroup whose reached drawables have
+    /// points Inochi2D leaves undeformed at rest.
     fn check_mesh_group_coverage(&mut self) {
         let mut findings = Vec::new();
         // One snapshot of the buffer for every lookup below.
@@ -612,22 +735,45 @@ impl Importer<'_> {
         let vec2s = |r: &BufferRef| riglet_format::buffer::read_vec2(&files, r, u64::MAX).ok();
         for (id, node) in &self.nodes {
             let Node::MeshDeformer(m) = node else { continue };
+            let Some(to_local) = self.mesh_bakes.get(id).copied().unwrap_or(Affine::IDENTITY).inverse() else {
+                continue;
+            };
             let Some(points) = vec2s(&m.mesh.positions) else { continue };
             let Some(indices) = riglet_format::buffer::read_indices(&files, &m.mesh.indices, u64::MAX).ok() else {
                 continue;
             };
+            let local: Vec<Vec2> = points.iter().map(|&p| to_local.point(p)).collect();
             let tris: Vec<[Vec2; 3]> =
-                (0..indices.len() / 3).map(|t| riglet_format::geometry::triangle(&points, &indices, t)).collect();
-            let inside = |p: Vec2| {
-                tris.iter()
-                    .any(|&t| riglet_format::geometry::barycentric(t, p).is_some_and(|l| l.iter().all(|&x| x >= -1e-5)))
+                (0..indices.len() / 3).map(|t| riglet_format::geometry::triangle(&local, &indices, t)).collect();
+            let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+            for p in &local {
+                lo = [lo[0].min(p[0]), lo[1].min(p[1])];
+                hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+            }
+            let (lo, hi) = ([lo[0].floor(), lo[1].floor()], [hi[0].ceil(), hi[1].ceil()]);
+            let sign = |p: Vec2, a: Vec2, b: Vec2| (p[0] - b[0]) * (a[1] - b[1]) - (a[0] - b[0]) * (p[1] - b[1]);
+            let in_tri = |p: Vec2, t: [Vec2; 3]| {
+                let d = [sign(p, t[0], t[1]), sign(p, t[1], t[2]), sign(p, t[2], t[0])];
+                !(d.iter().any(|&x| x < 0.0) && d.iter().any(|&x| x > 0.0))
             };
+            let hit = |p: Vec2| {
+                let inside = lo[0] <= p[0] && p[0] < hi[0] && lo[1] <= p[1] && p[1] < hi[1];
+                let corner = [p[0].floor(), p[1].floor()];
+                inside && tris.iter().any(|&t| in_tri(corner, t))
+            };
+            // Drawables reached through groups only (rotation deformers map
+            // their points rigidly, see MESHGROUP_TRANSFORM_APPROXIMATED).
             let mut outside = 0usize;
-            for child in &m.base.children {
-                if let Some(Node::Drawable(d)) = self.nodes.get(child)
-                    && let Some(pts) = vec2s(&d.mesh.positions)
-                {
-                    outside += pts.iter().filter(|&&p| !inside(p)).count();
+            let mut stack: Vec<&Id> = m.base.children.iter().collect();
+            while let Some(c) = stack.pop() {
+                match self.nodes.get(c) {
+                    Some(Node::Drawable(d)) => {
+                        if let Some(pts) = vec2s(&d.mesh.positions) {
+                            outside += pts.iter().filter(|&&p| !hit(to_local.point(p))).count();
+                        }
+                    }
+                    Some(Node::Group(g)) if !g.composite => stack.extend(g.base.children.iter()),
+                    _ => {}
                 }
             }
             if outside > 0 {
@@ -638,8 +784,57 @@ impl Importer<'_> {
             self.warn(
                 "MESHGROUP_OUTSIDE_POINTS",
                 Some(&id),
-                format!("{outside} child points lie outside the MeshGroup's mesh: Inochi2D leaves them undeformed, Riglet extrapolates"),
+                format!(
+                    "{outside} child points miss the MeshGroup's rest bitmask: Inochi2D leaves them undeformed, \
+                     Riglet extrapolates"
+                ),
             );
+        }
+    }
+
+    /// A static rotation deformer equal to `b` (rotation and per-axis scale;
+    /// a shear or mirror can't be expressed and is approximated).
+    fn bake_frame(&mut self, id: &str, name: &str, parent: &str, b: Affine) -> Result<(), InochiError> {
+        let [x, y, t] = b.m;
+        let angle = x[1].atan2(x[0]);
+        let (sin, cos) = angle.sin_cos();
+        let sx = x[0].hypot(x[1]);
+        let sy = -sin * y[0] + cos * y[1];
+        let shear = cos * y[0] + sin * y[1];
+        if shear.abs() > 1e-4 * sx.max(sy.abs()) || sy <= 0.0 {
+            self.warn(
+                "MESHGROUP_TRANSFORM_APPROXIMATED",
+                Some(id),
+                "static transforms above this node combine to a shear or mirror, approximated",
+            );
+        }
+        self.rotation(id, name, parent, true, [t[0], t[1], 0.0], angle, [sx, sy.max(1e-6)])
+    }
+
+    /// The frame for a blocked node: `r.outside` with rigid twins of the
+    /// rotation deformers in `r.chain` (created once per original).
+    fn outside_frame(&mut self, r: &Reach) -> Result<Id, InochiError> {
+        let mut parent = r.outside.clone();
+        for rid in &r.chain {
+            let tid = format!("{rid}:rigid");
+            if !self.nodes.contains_key(&tid) {
+                let Some(Node::Rotation(orig)) = self.nodes.get(rid).cloned() else { continue };
+                let mut b = base(&tid, &orig.base.name, Some(&parent), orig.base.visible);
+                set_ext(&mut b, serde_json::json!({ "twinOf": rid }));
+                self.insert(Node::Rotation(RotationDeformerNode { base: b, rest: orig.rest }))?;
+                self.twins.push((rid.clone(), tid.clone()));
+            }
+            parent = tid;
+        }
+        Ok(parent)
+    }
+
+    fn copy_twin_sets(&mut self) {
+        for (orig, twin) in &self.twins {
+            let sets = self.nodes.get(orig).map(|n| n.base().keyform_sets.clone()).unwrap_or_default();
+            if let Some(n) = self.nodes.get_mut(twin) {
+                n.base_mut().keyform_sets = sets;
+            }
         }
     }
 
@@ -810,6 +1005,7 @@ impl Importer<'_> {
         bake: Option<Affine>,
     ) -> Result<Option<usize>, InochiError> {
         let Some((positions, _, indices)) = self.mesh(v, id, bake) else { return Ok(None) };
+        self.mesh_bakes.insert(id.into(), bake.unwrap_or(Affine::IDENTITY));
         // Riglet rejects zero-area rest triangles (V7); Inochi2D's
         // rasterized lookup never selects them, so dropping them is exact.
         let mut kept = Vec::with_capacity(indices.len());
@@ -950,10 +1146,11 @@ impl Importer<'_> {
         for p in params {
             for b in p.get("bindings").and_then(Value::as_array).into_iter().flatten() {
                 let name = string(b, "param_name").unwrap_or("");
-                if name.starts_with("transform.")
-                    && let Some(u) = uuid(b, "node")
-                {
+                let Some(u) = uuid(b, "node") else { continue };
+                if name.starts_with("transform.") {
                     self.animated_transform.insert(u);
+                } else if name == "deform" {
+                    self.deformed.insert(u);
                 }
             }
         }
@@ -1581,7 +1778,11 @@ pub fn import(bytes: &[u8], options: &Options) -> Result<Import, InochiError> {
         pending_masks: Vec::new(),
         mask_thresholds: HashMap::new(),
         animated_transform: HashSet::new(),
+        deformed: HashSet::new(),
         placeholder: HashMap::new(),
+        twins: Vec::new(),
+        mesh_bakes: HashMap::new(),
+        static_deform_warned: HashSet::new(),
     };
     im.textures(c.textures)?;
     im.params(&params)?;
@@ -1590,6 +1791,7 @@ pub fn import(bytes: &[u8], options: &Options) -> Result<Import, InochiError> {
     im.check_mesh_group_coverage();
     im.resolve_masks();
     im.bindings(&params)?;
+    im.copy_twin_sets();
 
     if json.get("automation").and_then(Value::as_array).is_some_and(|a| !a.is_empty()) {
         im.warn("AUTOMATION_UNSUPPORTED", None, "automation (sine/physics) is kept in extensions");

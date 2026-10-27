@@ -417,6 +417,120 @@ fn mesh_group_warnings() {
     }
 }
 
+/// The stretch binding of `mesh_group`: its right column moves +10 at 1.
+fn stretch(mg: u32) -> serde_json::Value {
+    param(
+        10,
+        "stretch",
+        0.0,
+        1.0,
+        &[0.0, 1.0],
+        vec![binding(
+            mg,
+            "deform",
+            json!([[[[0, 0], [0, 0], [0, 0], [0, 0]]], [[[0, 0], [10, 0], [0, 0], [10, 0]]]]),
+            "Linear",
+        )],
+    )
+}
+
+fn translated(x: f32, y: f32) -> serde_json::Value {
+    json!({"transform": {"trans": [x, y, 0], "rot": [0, 0, 0], "scale": [1, 1]}})
+}
+
+#[test]
+fn nested_static_mesh_group_children_keep_its_transform() {
+    // Outer MeshGroup -> inner MeshGroup translated (2, 3) -> part. Every
+    // static transform under the outer one is baked, the inner one's too.
+    let child = part(5, "c", [1.0, 1.0], [2.0, 2.0], json!({}));
+    let inner = mesh_group(4, vec![child], translated(2.0, 3.0));
+    let outer = mesh_group(3, vec![inner], json!({}));
+    let i = import(&puppet(vec![outer], vec![stretch(3)]));
+    let rig = rig(&i);
+    assert_close(positions(&rig, &eval(&rig, &[]), 5)[0], [3.0, 4.0]);
+    // Through both meshes: the outer stretch doubles x.
+    assert_close(positions(&rig, &eval(&rig, &[(10, [1.0, 0.0])]), 5)[0], [6.0, 4.0]);
+}
+
+#[test]
+fn animated_transform_under_baked_ancestors_keeps_their_offset() {
+    // MeshGroup -> static node (5, 0) under a part -> animated part at (1, 1):
+    // the static offset must still apply to the animated part.
+    let anim = part(6, "anim", [0.0, 0.0], [1.0, 1.0], translated(1.0, 1.0));
+    let holder = part(
+        4,
+        "holder",
+        [0.0, 0.0],
+        [1.0, 1.0],
+        json!({"children": [node(5, "n", vec![anim], translated(5.0, 0.0))]}),
+    );
+    let mg = mesh_group(3, vec![holder], json!({}));
+    let tx = binding(6, "transform.t.x", json!([[0], [2]]), "Linear");
+    let i = import(&puppet(vec![mg], vec![param(11, "move", 0.0, 1.0, &[0.0, 1.0], vec![tx])]));
+    let rig = rig(&i);
+    assert_close(positions(&rig, &eval(&rig, &[]), 6)[0], [6.0, 1.0]);
+    assert_close(positions(&rig, &eval(&rig, &[(11, [1.0, 0.0])]), 6)[0], [8.0, 1.0]);
+    assert!(i.document.model.nodes.contains_key("inochi:6:bake"));
+}
+
+#[test]
+fn mesh_groups_stop_at_plain_nodes() {
+    // Inochi2D's MeshGroup reaches drawables and their drawable children,
+    // but not through a plain Node: the part under the node stays put.
+    let reached = part(4, "reached", [9.0, 9.0], [10.0, 10.0], json!({}));
+    let blocked = part(6, "blocked", [9.0, 9.0], [10.0, 10.0], json!({}));
+    let holder =
+        part(7, "holder", [0.0, 0.0], [1.0, 1.0], json!({"children": [node(5, "n", vec![blocked], json!({}))]}));
+    let mg = mesh_group(3, vec![reached, holder], json!({}));
+    let i = import(&puppet(vec![mg], vec![stretch(3)]));
+    let rig = rig(&i);
+    let out = eval(&rig, &[(10, [1.0, 0.0])]);
+    assert_close(positions(&rig, &out, 4)[0], [18.0, 9.0]);
+    assert_close(positions(&rig, &out, 6)[0], [9.0, 9.0]);
+    assert!(!codes(&i).contains(&"MESHGROUP_TRANSLATE_APPROXIMATED"));
+}
+
+#[test]
+fn blocked_nodes_keep_animated_frames_and_visibility() {
+    // MeshGroup -> hidden animated part -> plain node -> part: the node
+    // moves outside the mesh deformer under a rigid copy of the part's
+    // rotation deformer, with its bindings, and stays hidden.
+    let leaf = part(6, "leaf", [0.0, 0.0], [1.0, 1.0], json!({}));
+    let holder = part(
+        4,
+        "holder",
+        [0.0, 0.0],
+        [1.0, 1.0],
+        json!({"enabled": false, "children": [node(5, "n", vec![leaf], json!({}))]}),
+    );
+    let mg = mesh_group(3, vec![holder], json!({}));
+    let ty = binding(4, "transform.t.y", json!([[0], [3]]), "Linear");
+    let i = import(&puppet(vec![mg], vec![stretch(3), param(11, "move", 0.0, 1.0, &[0.0, 1.0], vec![ty])]));
+    let rig = rig(&i);
+    let out = eval(&rig, &[(10, [1.0, 0.0]), (11, [1.0, 0.0])]);
+    assert_close(positions(&rig, &out, 6)[1], [1.0, 3.0]);
+    let twin = &i.document.model.nodes["inochi:4:transform:rigid"];
+    assert_eq!(twin.base().keyform_sets.len(), 1);
+    let index = rig.node_index("inochi:6").unwrap();
+    assert!(!out.drawable(index).unwrap().visible, "hidden like its Inochi2D ancestor");
+}
+
+#[test]
+fn translate_children_and_static_deform_warn() {
+    let leaf = part(6, "leaf", [0.0, 0.0], [1.0, 1.0], json!({}));
+    let deformed =
+        part(4, "deformed", [1.0, 1.0], [2.0, 2.0], json!({"children": [node(5, "n", vec![leaf], json!({}))]}));
+    let mg = mesh_group(3, vec![deformed], json!({"translate_children": true}));
+    let d =
+        binding(4, "deform", json!([[[[0, 0], [0, 0], [0, 0], [0, 0]]], [[[1, 0], [1, 0], [1, 0], [1, 0]]]]), "Linear");
+    let i = import(&puppet(vec![mg], vec![stretch(3), param(11, "d", 0.0, 1.0, &[0.0, 1.0], vec![d])]));
+    rig(&i);
+    let c = codes(&i);
+    for code in ["MESHGROUP_TRANSLATE_APPROXIMATED", "MESHGROUP_DEFORM_APPROXIMATED"] {
+        assert!(c.contains(&code), "missing {code}: {c:?}");
+    }
+}
+
 // ---------- textures, parameters, errors ----------
 
 #[test]
