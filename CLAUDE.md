@@ -176,9 +176,24 @@ cargo +nightly fuzz run texture_png fuzz/corpus/texture_png fuzz/seeds/texture_p
 cargo test --test malformed -- --ignored write_fuzz_seeds          # regenerate seeds after format changes
 ```
 
-Fuzz crashes become regression tests in
-`crates/riglet-format/tests/malformed.rs` (input under
-`crates/riglet-format/tests/regressions/`), not just corpus files.
+## Fuzzing policy
+
+- **Per push (CI):** the fuzz crate must build, plus a ~60 s run per
+  target from the committed seeds.
+- **Weekly (`fuzz-weekly.yml`, Sundays; also manual via workflow_dispatch
+  with a `minutes` input):** 30 min per target on Linux x86_64. The corpus
+  persists between runs with actions/cache; the committed seeds in
+  `fuzz/seeds/` are always the baseline. It blocks nothing, but a crash
+  fails the job, uploads the input, and opens an issue.
+- **Locally:** no long fuzz sessions as part of normal work. Only when a
+  change touches parsing, validation, binding or other untrusted-input
+  code: 10 minutes per affected target, unless the maintainer asks for
+  more. Don't block on a running session.
+- **Every crash input, from any run, becomes a regular regression test:**
+  put the file in `crates/riglet-format/tests/regressions/<target>/`
+  (package, model_json) or `crates/riglet-render/tests/regressions/texture_png/`,
+  in the same commit as the fix. `tests/regressions.rs` replays every file
+  through the same path as the fuzz target.
 
 `fuzz/` is its own Cargo workspace (it needs nightly), so `--workspace`
 commands skip it. Check that it still compiles with
