@@ -13,6 +13,10 @@ sidecars).
   from Inochi2D (BSD-2-Clause), keep its copyright notice next to that code.
 - **Stack:** Rust, wgpu (rendering, also offscreen for the CLI), egui/eframe
   (editor). Browser build later via wasm.
+- **Platforms:** Linux, macOS, and Windows are all first-class (x86_64 and
+  arm64). wgpu backends: Vulkan (Linux, Windows), Metal (macOS), DX12
+  (Windows), with GL as fallback. Every change must build and pass tests on
+  all three. See "Cross-platform rules" below.
 - **Approved dependencies:** serde, serde_json, zip, png, uuid, thiserror,
   wgpu, egui/eframe (editor only), clap (CLI only), cargo-fuzz (dev tool).
   Ask before adding anything else that is large.
@@ -77,6 +81,31 @@ depends on format + render + converters. Only the editor depends on egui.
   `schemaVersion` when the spec changes, and add a migration.
 - **Commits.** Small, reviewable, with tests. Ask before adding large
   dependencies or changing the architecture.
+
+## Cross-platform rules
+
+- **CI matrix:** `ubuntu-latest`, `macos-latest`, `windows-latest` run build,
+  test, clippy, and fmt on every push (GitHub Actions, added with the M1
+  workspace). A change is not done until all three pass.
+- **Paths:** use `std::path::Path`/`PathBuf` for OS paths, never string
+  concatenation with `/` or `\`. Paths *inside* packages (ZIP entries,
+  `BufferRef.file`, texture files) are always `/`-separated and relative;
+  readers reject `\`, absolute paths, drive letters, and `..`.
+- **Case and names:** never rely on filesystem case sensitivity (macOS and
+  Windows are case-insensitive by default). Treat package entry names that
+  differ only by case as a validation error.
+- **Text and bytes:** binary data is always little-endian, read with explicit
+  `from_le_bytes`, never by casting memory. Write JSON with `\n` line endings.
+  `.gitattributes` forces LF in the repo and marks binaries as binary.
+- **No platform-specific code** outside `cfg` blocks with an implementation
+  for every target. Prefer crates that already cover all three platforms.
+- **GPU in tests:** headless render tests must run without a real GPU: CI
+  uses Mesa lavapipe (Linux), WARP (Windows), and Metal (macOS). Golden-image
+  comparisons use a per-pixel tolerance, because rasterization differs
+  slightly between backends. Evaluator tests compare vertices with a float
+  epsilon, never exact equality.
+- **Editor:** native file dialogs and clipboard via cross-platform crates
+  (ask before adding them in M4). Linux builds need X11 and Wayland support.
 
 ## Build and test
 
