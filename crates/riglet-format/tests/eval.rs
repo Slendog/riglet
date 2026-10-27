@@ -501,6 +501,171 @@ fn rotation_under_mesh_deformer_follows_triangle() {
     assert_close(positions(&rig, &eval(&rig, &[("p", [1.0, 0.0])]), "d")[0], [-10.0, 30.0]);
 }
 
+// ---------- S7: rotation deformers under mesh deformers, delta modes ----------
+
+/// mesh_rig's mesh (vertex 1 moves right by 100 at p = 1) with a rotation
+/// deformer "r" at (25, 25) holding drawable "d", in `mode`.
+fn rotation_in_mesh(mode: Option<riglet_format::model::MeshParent>, child: &[[f32; 2]]) -> Builder {
+    let mut b = mesh_rig(&[[0.0, 0.0]]);
+    b.rotation("r", "m", [25.0, 25.0], 0.0, 1.0);
+    if let Node::Rotation(r) = b.node_mut("r") {
+        r.mesh_parent = mode;
+    }
+    b.drawable("e", "r", child);
+    b
+}
+
+fn e_at(b: &Builder, p: f32) -> Vec<[f32; 2]> {
+    let rig = b.rig();
+    positions(&rig, &eval(&rig, &[("p", [p, 0.0])]), "e")
+}
+
+#[test]
+fn mesh_parent_modes() {
+    use riglet_format::model::MeshParent;
+    // Child (20, 0) of the rotation at (25, 25): (45, 25) in triangle 0,
+    // which at p = 1 maps (x, y) -> (2x, y) (vertex 1 moves +100).
+    let child = [[20.0, 0.0]];
+    // Pointwise: the point itself goes through the triangle.
+    let p = e_at(&rotation_in_mesh(Some(MeshParent::Pointwise), &child), 1.0);
+    assert_close(p[0], [90.0, 25.0]);
+    // Translate: only the origin follows, (25, 25) -> (50, 25).
+    let p = e_at(&rotation_in_mesh(Some(MeshParent::Translate), &child), 1.0);
+    assert_close(p[0], [70.0, 25.0]);
+    // Rigid (default, None = Some(Rigid)): origin plus the triangle's
+    // rotation (0 here) and scale sqrt(|det J|) = sqrt(2) (E5).
+    let p = e_at(&rotation_in_mesh(None, &child), 1.0);
+    assert_close(p[0], [50.0 + 20.0 * 2f32.sqrt(), 25.0]);
+    assert_eq!(p, e_at(&rotation_in_mesh(Some(MeshParent::Rigid), &child), 1.0));
+    // At rest every mode is the plain rotation map.
+    for mode in [None, Some(MeshParent::Translate), Some(MeshParent::Pointwise)] {
+        assert_close(e_at(&rotation_in_mesh(mode, &child), 0.0)[0], [45.0, 25.0]);
+    }
+}
+
+#[test]
+fn pointwise_follows_the_rotation_first() {
+    use riglet_format::model::MeshParent;
+    // The rotation deformer turns its child by 90 degrees at rest; pointwise
+    // maps the rotated point through the triangle it lands in.
+    let mut b = rotation_in_mesh(Some(MeshParent::Pointwise), &[[50.0, 0.0]]);
+    if let Node::Rotation(r) = b.node_mut("r") {
+        r.rest.angle = 90.0;
+    }
+    // (25, 25) + R90 (50, 0) = (25, 75): triangle 0 at rest (x + y <= 100),
+    // barycentric (0, 0.25, 0.75) -> vertex 1 moved +100: (50, 75).
+    assert_close(e_at(&b, 1.0)[0], [50.0, 75.0]);
+}
+
+#[test]
+fn mesh_deltas_added_maps_the_rest_point_and_adds_the_delta() {
+    use riglet_format::model::MeshDeltas;
+    let mut b = mesh_rig(&[[25.0, 25.0]]);
+    let kfs = vec![b.positions(&[[0.0, 0.0]]), b.positions(&[[0.0, 10.0]])];
+    b.set("d", &[linear("p", &[0.0, 1.0])], kfs);
+    if let Node::MeshDeformer(m) = b.node_mut("m") {
+        m.deltas = Some(MeshDeltas::Added);
+    }
+    let rig = b.rig();
+    // T(25, 25) = (50, 25), plus the delta (0, 10). (Mapped gives the same
+    // for a y delta here, since triangle 0 keeps y; the x case below
+    // tells them apart.)
+    assert_close(positions(&rig, &eval(&rig, &[("p", [1.0, 0.0])]), "d")[0], [50.0, 35.0]);
+    let mut b = mesh_rig(&[[25.0, 25.0]]);
+    let kfs = vec![b.positions(&[[0.0, 0.0]]), b.positions(&[[10.0, 0.0]])];
+    b.set("d", &[linear("p", &[0.0, 1.0])], kfs);
+    let mapped = {
+        let rig = b.rig();
+        positions(&rig, &eval(&rig, &[("p", [1.0, 0.0])]), "d")[0]
+    };
+    if let Node::MeshDeformer(m) = b.node_mut("m") {
+        m.deltas = Some(MeshDeltas::Added);
+    }
+    let rig = b.rig();
+    let added = positions(&rig, &eval(&rig, &[("p", [1.0, 0.0])]), "d")[0];
+    // Mapped (default): (35, 25) through triangle 0, (x, y) -> (2x, y).
+    assert_close(mapped, [70.0, 25.0]);
+    // Added: T(25, 25) + (10, 0) = (50, 25) + (10, 0).
+    assert_close(added, [60.0, 25.0]);
+}
+
+/// mesh_rig (triangle 0 maps (x, y) -> (2x, y), triangle 1 maps (x, y) ->
+/// (x + 100 - y, y) at p = 1) with rotation "r" in `mode` at (25, 25) whose
+/// origin moves by `shift` at q = 1, holding drawable "e" with `child`.
+fn moving_rotation(mode: riglet_format::model::MeshParent, shift: [f32; 2], child: &[[f32; 2]]) -> Builder {
+    let mut b = rotation_in_mesh(Some(mode), child);
+    b.param("q", 0.0, 1.0, 0.0);
+    let kfs = vec![Keyform::default(), Keyform { origin: Some(shift), ..Default::default() }];
+    b.set("r", &[linear("q", &[0.0, 1.0])], kfs);
+    b
+}
+
+fn e_at_pq(b: &Builder) -> Vec<[f32; 2]> {
+    let rig = b.rig();
+    positions(&rig, &eval(&rig, &[("p", [1.0, 0.0]), ("q", [1.0, 0.0])]), "e")
+}
+
+#[test]
+fn pointwise_walks_to_the_triangle_a_moved_point_is_in() {
+    use riglet_format::model::MeshParent;
+    // At rest the point (25, 25) binds to triangle 0; moved to (75, 75) it is
+    // in triangle 1: T1 gives (100, 75), where triangle 0 would give (150, 75).
+    let b = moving_rotation(MeshParent::Pointwise, [50.0, 50.0], &[[0.0, 0.0]]);
+    assert_close(e_at_pq(&b)[0], [100.0, 75.0]);
+}
+
+#[test]
+fn translate_uses_the_rest_origin_when_deltas_are_added() {
+    use riglet_format::model::{MeshDeltas, MeshParent};
+    // Origin (25, 25) moved to (45, 25) by its own delta. Mapped deltas: the
+    // shift is the displacement at (45, 25), (45, 0); added: at the rest
+    // origin, (25, 0).
+    let mut b = moving_rotation(MeshParent::Translate, [20.0, 0.0], &[[0.0, 0.0]]);
+    assert_close(e_at_pq(&b)[0], [90.0, 25.0]);
+    if let Node::MeshDeformer(m) = b.node_mut("m") {
+        m.deltas = Some(MeshDeltas::Added);
+    }
+    assert_close(e_at_pq(&b)[0], [70.0, 25.0]);
+}
+
+#[test]
+fn translate_inside_a_pointwise_frame_only_shifts() {
+    use riglet_format::model::MeshParent;
+    // m -> pointwise "p0" at (0, 0) -> translate "t" at (25, 25) -> point
+    // (20, 0), i.e. (45, 25): shifted by the displacement at (25, 25), (25,
+    // 0), not mapped pointwise (which would give (90, 25)).
+    let mut b = mesh_rig(&[[0.0, 0.0]]);
+    b.rotation("p0", "m", [0.0, 0.0], 0.0, 1.0);
+    b.rotation("t", "p0", [25.0, 25.0], 0.0, 1.0);
+    if let Node::Rotation(r) = b.node_mut("p0") {
+        r.mesh_parent = Some(MeshParent::Pointwise);
+    }
+    if let Node::Rotation(r) = b.node_mut("t") {
+        r.mesh_parent = Some(MeshParent::Translate);
+    }
+    b.drawable("e", "t", &[[20.0, 0.0]]);
+    assert_close(e_at(&b, 1.0)[0], [70.0, 25.0]);
+    // Under a rigid rotation instead, translate is invalid (V2).
+    if let Node::Rotation(r) = b.node_mut("p0") {
+        r.mesh_parent = None;
+    }
+    let issues = riglet_format::validate(&b.document(), &riglet_format::Limits::default());
+    assert!(issues.iter().any(|i| i.code == "V2_MESH_PARENT"), "{issues:?}");
+}
+
+#[test]
+fn mesh_parent_needs_a_mesh_deformer_parent() {
+    use riglet_format::model::MeshParent;
+    let mut b = Builder::new();
+    b.rotation("r", "root", [0.0, 0.0], 0.0, 1.0);
+    if let Node::Rotation(r) = b.node_mut("r") {
+        r.mesh_parent = Some(MeshParent::Pointwise);
+    }
+    b.drawable("d", "r", &[[0.0, 0.0]]);
+    let issues = riglet_format::validate(&b.document(), &riglet_format::Limits::default());
+    assert!(issues.iter().any(|i| i.code == "V2_MESH_PARENT"), "{issues:?}");
+}
+
 // ---------- EvalOutput reuse ----------
 
 #[test]

@@ -406,14 +406,11 @@ fn mesh_group_warnings() {
     let i = import(&puppet(vec![mg], vec![param(10, "p", 0.0, 1.0, &[0.0, 1.0], vec![tx])]));
     rig(&i);
     let c = codes(&i);
-    for code in [
-        "MESHGROUP_OUTSIDE_POINTS",
-        "MESHGROUP_DYNAMIC_APPROXIMATED",
-        "MESHGROUP_TRANSFORM_APPROXIMATED",
-        "MESHGROUP_DEGENERATE_TRIANGLES",
-    ] {
+    for code in ["MESHGROUP_OUTSIDE_POINTS", "MESHGROUP_DYNAMIC_APPROXIMATED", "MESHGROUP_DEGENERATE_TRIANGLES"] {
         assert!(c.contains(&code), "missing {code}: {c:?}");
     }
+    // The animated part maps pointwise (S7): no approximation warning.
+    assert!(!c.contains(&"MESHGROUP_TRANSFORM_APPROXIMATED"), "{c:?}");
 }
 
 /// The stretch binding of `mesh_group`: its right column moves +10 at 1.
@@ -519,19 +516,64 @@ fn blocked_nodes_keep_animated_frames_and_visibility() {
 }
 
 #[test]
-fn translate_children_and_static_deform_warn() {
+fn translate_children_nodes_only_translate() {
+    // S7 "translate": a static plain node under a translate_children
+    // MeshGroup moves with the mesh at its origin, its subtree is not
+    // stretched (Inochi2D's setGroup only filters the node's translation).
     let leaf = part(6, "leaf", [0.0, 0.0], [1.0, 1.0], json!({}));
-    let deformed =
-        part(4, "deformed", [1.0, 1.0], [2.0, 2.0], json!({"children": [node(5, "n", vec![leaf], json!({}))]}));
-    let mg = mesh_group(3, vec![deformed], json!({"translate_children": true}));
+    let n = node(5, "n", vec![leaf], translated(4.0, 5.0));
+    let mg = mesh_group(3, vec![n], json!({"translate_children": true}));
+    let i = import(&puppet(vec![mg], vec![stretch(3)]));
+    let rig = rig(&i);
+    let p = positions(&rig, &eval(&rig, &[(10, [1.0, 0.0])]), 6);
+    // Origin (4, 5) -> (8, 5); the 1 x 1 quad keeps its size.
+    assert_close(p[0], [8.0, 5.0]);
+    assert_close(p[1], [9.0, 5.0]);
+    assert!(!codes(&i).contains(&"MESHGROUP_TRANSLATE_APPROXIMATED"), "static node: exact");
+}
+
+#[test]
+fn animated_parts_under_mesh_groups_map_pointwise() {
+    // S7 "pointwise": every vertex of an animated part follows its own
+    // triangle, as Inochi2D filters each vertex.
+    let p = part(4, "p", [1.0, 1.0], [3.0, 3.0], json!({}));
+    let mg = mesh_group(3, vec![p], json!({"dynamic_deformation": true}));
+    let tx = binding(4, "transform.t.x", json!([[0], [1]]), "Linear");
+    let i = import(&puppet(vec![mg], vec![stretch(3), param(11, "move", 0.0, 1.0, &[0.0, 1.0], vec![tx])]));
+    let rig = rig(&i);
+    let rot = &i.document.model.nodes["inochi:4:transform"];
+    let riglet_format::model::Node::Rotation(r) = rot else { panic!() };
+    assert_eq!(r.mesh_parent, Some(riglet_format::model::MeshParent::Pointwise));
+    // The stretch doubles x on every vertex (a rigid map could not).
+    let out = eval(&rig, &[(10, [1.0, 0.0])]);
+    assert_close(positions(&rig, &out, 4)[0], [2.0, 1.0]);
+    assert_close(positions(&rig, &out, 4)[1], [6.0, 1.0]);
+    // Moved by 1 first, then stretched.
+    let out = eval(&rig, &[(10, [1.0, 0.0]), (11, [1.0, 0.0])]);
+    assert_close(positions(&rig, &out, 4)[0], [4.0, 1.0]);
+    assert!(!codes(&i).iter().any(|c| c.starts_with("MESHGROUP_TRANS")), "{:?}", codes(&i));
+}
+
+#[test]
+fn static_mesh_groups_add_deform_deltas_after_the_map() {
+    // S7 deltas "added": without dynamic_deformation, Inochi2D maps the
+    // rest vertex and adds the part's own deformation: 2 * 1 + 1 = 3,
+    // where mapping the deformed vertex would give 2 * (1 + 1) = 4.
+    let p = part(4, "p", [1.0, 1.0], [2.0, 2.0], json!({}));
+    let mg = mesh_group(3, vec![p], json!({}));
     let d =
         binding(4, "deform", json!([[[[0, 0], [0, 0], [0, 0], [0, 0]]], [[[1, 0], [1, 0], [1, 0], [1, 0]]]]), "Linear");
     let i = import(&puppet(vec![mg], vec![stretch(3), param(11, "d", 0.0, 1.0, &[0.0, 1.0], vec![d])]));
-    rig(&i);
-    let c = codes(&i);
-    for code in ["MESHGROUP_TRANSLATE_APPROXIMATED", "MESHGROUP_DEFORM_APPROXIMATED"] {
-        assert!(c.contains(&code), "missing {code}: {c:?}");
-    }
+    let r = rig(&i);
+    assert_close(positions(&r, &eval(&r, &[(10, [1.0, 0.0]), (11, [1.0, 0.0])]), 4)[0], [3.0, 1.0]);
+    // dynamic_deformation maps the deformed vertex instead.
+    let p = part(4, "p", [1.0, 1.0], [2.0, 2.0], json!({}));
+    let mg = mesh_group(3, vec![p], json!({"dynamic_deformation": true}));
+    let d =
+        binding(4, "deform", json!([[[[0, 0], [0, 0], [0, 0], [0, 0]]], [[[1, 0], [1, 0], [1, 0], [1, 0]]]]), "Linear");
+    let i = import(&puppet(vec![mg], vec![stretch(3), param(11, "d", 0.0, 1.0, &[0.0, 1.0], vec![d])]));
+    let rig = rig(&i);
+    assert_close(positions(&rig, &eval(&rig, &[(10, [1.0, 0.0]), (11, [1.0, 0.0])]), 4)[0], [4.0, 1.0]);
 }
 
 // ---------- textures, parameters, errors ----------
@@ -667,4 +709,24 @@ fn fixed_function_blend_modes_map_and_linear_dodge_is_screen() {
         assert_eq!(d.blend_mode, *mode);
     }
     assert!(!codes(&i).contains(&"BLEND_MODE_UNSUPPORTED"));
+}
+
+#[test]
+fn translate_children_node_under_an_animated_part_only_translates() {
+    // MeshGroup (translate_children) -> animated part -> plain node at (4, 5)
+    // -> leaf: the node is translated by the mesh at its origin, so the leaf
+    // keeps its size; the part's own vertices map pointwise.
+    let leaf = part(6, "leaf", [0.0, 0.0], [1.0, 1.0], json!({}));
+    let p = part(4, "p", [1.0, 1.0], [2.0, 2.0], json!({"children": [node(5, "n", vec![leaf], translated(4.0, 5.0))]}));
+    let mg = mesh_group(3, vec![p], json!({"translate_children": true}));
+    let ty = binding(4, "transform.t.y", json!([[0], [1]]), "Linear");
+    let i = import(&puppet(vec![mg], vec![stretch(3), param(11, "move", 0.0, 1.0, &[0.0, 1.0], vec![ty])]));
+    let rig = rig(&i);
+    let out = eval(&rig, &[(10, [1.0, 0.0]), (11, [1.0, 0.0])]);
+    // Node origin (4, 6) -> (8, 6).
+    assert_close(positions(&rig, &out, 6)[0], [8.0, 6.0]);
+    assert_close(positions(&rig, &out, 6)[1], [9.0, 6.0]);
+    // The part itself: (1, 2) -> (2, 2).
+    assert_close(positions(&rig, &out, 4)[0], [2.0, 2.0]);
+    assert!(!codes(&i).iter().any(|c| c.starts_with("MESHGROUP_TRANS")), "{:?}", codes(&i));
 }

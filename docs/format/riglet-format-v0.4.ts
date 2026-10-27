@@ -222,12 +222,18 @@ export interface RotationDeformerNode extends NodeBase {
                                    // negative = mirror on that axis (S6)
     opacity: number;
   };
+  // S7: how it follows a mesh deformer above it (E5); default "rigid".
+  // V2 restricts where "translate" and "pointwise" may appear.
+  meshParent?: "rigid" | "translate" | "pointwise";
 }
 
 export interface MeshDeformerNode extends NodeBase {
   type: "meshDeformer";            // Inochi2D MeshGroup
   mesh: { positions: BufferRef; indices: BufferRef };   // parent space
   rest: { opacity: number };
+  // S7 (E6): "mapped" (default): a child's own position deltas go through
+  // the map; "added": the rest-pose point is mapped and the deltas added.
+  deltas?: "mapped" | "added";
   // Live2D export: approximated by fitting a warp deformer (emits a warning)
 }
 
@@ -421,10 +427,24 @@ export interface CurveKey {
  *         p' = W(origin) + ds * R(angle + dθ) * S * p
  *       If |det J0| < 1e-12 or both atan2 arguments of rot(J) are 0, use
  *       dθ = 0 and ds = 1.
- *     - Parent is a mesh deformer: as for a warp, with W the affine map of
- *       the triangle bound to origin (E6) and J its linear part. A mesh
- *       deformer is the identity map at rest, so J0 = I exactly:
- *       dθ = rot(J), ds = sqrt(|det J|).
+ *     - Parent is a mesh deformer, meshParent "rigid" (the default): as for
+ *       a warp, with W the affine map of the triangle bound to origin (E6)
+ *       and J its linear part. A mesh deformer is the identity map at rest,
+ *       so J0 = I exactly: dθ = rot(J), ds = sqrt(|det J|).
+ *     - meshParent "pointwise" (S7; the parent is a mesh deformer, V2):
+ *       p' = origin + R(angle) * S * p as for a group parent, and then every
+ *       point goes through the mesh deformer on its own (E6), with a walked
+ *       triangle. (This is how Inochi2D's MeshGroup filters each vertex of
+ *       a part with a transform.)
+ *     - meshParent "translate" (S7; V2): the points travel as for a group
+ *       parent through this deformer and the rotation deformers above it
+ *       up to the nearest mesh deformer M; there, instead of mapping them,
+ *       M moves all of them by its displacement at this deformer's origin
+ *       o: shift = W(o) - o, with W the affine map of o's walked triangle
+ *       (E6). o is carried up the same frames as the points; when M has
+ *       deltas "added", o is the origin without this deformer's own origin
+ *       deltas (its rest origin). Deformers above M apply as usual. (This
+ *       is Inochi2D's translate_children for plain nodes.)
  *
  * E6. Mesh deformer binding. Derived at load, never stored.
  *     - Binding fixes one triangle per child point, chosen from the child's
@@ -442,8 +462,29 @@ export interface CurveKey {
  *       example drawable -> warp -> mesh deformer) bind using their rest
  *       positions mapped up the REST chain into the mesh deformer's space.
  *       Mesh deformers are the identity at rest, so this needs no recursion.
- *     - To verify against Inochi2D MeshGroup in M3. If Inochi2D differs, the
- *       converter emits a warning; this rule does not change silently.
+ *     - Walked triangles (S7): points that reach M through a "pointwise"
+ *       rotation deformer, and "translate" origins, re-find their triangle
+ *       every frame from their CURRENT position in M's space (before M's
+ *       map; with deltas "added", the position without the own deltas),
+ *       starting at the bound triangle above: up to 8 times, if the
+ *       position's barycentric coordinates in the current triangle's REST
+ *       shape are all >= -1e-6, stop; else cross the edge opposite the
+ *       most negative coordinate into the lowest-index other triangle
+ *       sharing that edge; stop at the mesh boundary (no such triangle) or
+ *       at a zero-area triangle. The result is the triangle reached. This
+ *       is O(1) per point and frame (at most 8 steps over per-triangle
+ *       neighbor lists built at load). Every other point keeps its bound
+ *       triangle.
+ *     - deltas "added" (S7): for a drawable's points, with q the point's
+ *       current position in M's space and q0 the same point computed
+ *       without the drawable's own keyform position deltas, the result is
+ *       W(q0) + (q - q0) (W of q0's triangle), and q0 continues up as
+ *       W(q0). Only the drawable's own deltas count; deformer points are
+ *       always mapped. (Inochi2D MeshGroups without dynamic_deformation.)
+ *     - Inochi2D quirk, not reproduced: Inochi2D looks points up in a
+ *       per-pixel rest bitmask (a point whose floor() corner is in no
+ *       triangle stays undeformed); Riglet extrapolates them as above. The
+ *       importer warns MESHGROUP_OUTSIDE_POINTS.
  *
  * E7. Warp deformer.
  *     - Control point index: j * (cols + 1) + i (row j, column i).
@@ -641,6 +682,11 @@ export interface CurveKey {
  *       rest.drawOrder, and its keyforms don't animate drawOrder.
  *     - parent and children agree for every node. No node is listed twice.
  *     - No cycles; every node is reachable from root.
+ *     - S7 meshParent: "pointwise" only when the rotation deformer's nearest
+ *       deformer ancestor is a mesh deformer; "translate" only when a mesh
+ *       deformer is above it through rotation deformers only, and the one
+ *       directly under that mesh deformer is this one or a "pointwise" one
+ *       (V2_MESH_PARENT).
  *     - A drawable has no children (no node space is defined for them; see
  *       Known gaps).
  * V3. References

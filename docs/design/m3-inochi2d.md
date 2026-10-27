@@ -212,9 +212,9 @@ in `extensions` losslessly, no warning.
 | Composite `tint`, `screenTint` | ext (Known gap: composite tint) | approx `COMPOSITE_TINT_DROPPED` when not default |
 | Composite `propagate_meshgroup` | ext | approx `PROPAGATE_MESHGROUP_UNSUPPORTED` when true |
 | MeshGroup | MeshDeformer; only what Inochi2D's `setGroup` reaches is under it: drawables, their drawable children and composites with `propagate_meshgroup`. Other nodes are "blocked": moved outside the mesh deformers under rigid `:rigid` twins of the animated frames in between (exact), and their subtree isn't reached by any MeshGroup | exact for reached points its rest bitmask covers; approx `MESHGROUP_OUTSIDE_POINTS` (Inochi2D leaves points whose `floor()` corner misses every rest triangle undeformed, Riglet extrapolates) |
-| MeshGroup `dynamic_deformation` | true: maps the deformed child points, like E6, but looks them up each frame (Riglet binds at rest): approx `MESHGROUP_DYNAMIC_APPROXIMATED`. false: adds the child's own deformation after the map (E6 maps it): approx `MESHGROUP_DEFORM_APPROXIMATED` when a reached child has deform bindings | approx |
-| MeshGroup `translate_children` | a blocked plain node only has its translation moved by the mesh; Riglet gives it a rigid rotation deformer under the mesh deformer, which also rotates and scales it (E5) | approx `MESHGROUP_TRANSLATE_APPROXIMATED` (proposed S7 "translate") |
-| Animated transform on a reached drawable under a MeshGroup | Inochi2D deforms every vertex individually; Riglet maps the rotation deformer rigidly (E5). Static ones are baked into the vertices (exact); baked static ancestors of an animated one become one `:bake` rotation deformer | approx `MESHGROUP_TRANSFORM_APPROXIMATED` (proposed S7 "pointwise"; measured in `tests/meshgroup_error.rs`) |
+| MeshGroup `dynamic_deformation` | true: deltas mapped (E6); Inochi2D looks direct children up again each frame with their deltas, Riglet keeps their rest triangle: approx `MESHGROUP_DYNAMIC_APPROXIMATED` (0.001 px on Midori). false: mesh deformer `deltas: "added"` (S7) | exact (false), approx (true) |
+| MeshGroup `translate_children` | a blocked plain node gets a rotation deformer with `meshParent: "translate"` (S7), also inside a pointwise frame | exact (`MESHGROUP_TRANSLATE_APPROXIMATED` only if the chain can't carry it) |
+| Animated transform on a reached drawable under a MeshGroup | rotation deformer with `meshParent: "pointwise"` (S7; walked triangles). Static ones are baked into the vertices; baked static ancestors of an animated one become one `:bake` rotation deformer (pointwise) | exact (Midori: max 0.61 px vs the Inochi2D reference, `tests/meshgroup_error.rs`) |
 | `lockToRoot: true` | ext | approx `LOCK_TO_ROOT_UNSUPPORTED` |
 | SimplePhysics node | PhysicsRig (one pendulum: length, gravity, damping mapped to mobility/delay/acceleration; output param from `param` + `map_mode`), all original fields in ext | approx `PHYSICS_APPROXIMATED`; exported back exactly from ext when unchanged |
 | Camera (.inx), Shapes, Tmp, unknown types | the whole subtree's JSON kept in ext on the parent | unsupported `NODE_TYPE_UNSUPPORTED` (Camera: ext, no warning) |
@@ -343,9 +343,10 @@ marked by its id suffix or by `extensions.inochi2d`:
 Data the importer converted (tint/screen order, multiplicative sets, x/y
 rotations as scales, cubic axes) is converted back with the inverse
 formulas; the warnings the importer emitted are not repeated, new losses
-get their own codes. The S7 decision changes two rows: with "pointwise"
-and "translate", rotation deformers under mesh deformers map back to Part
-and plain-node transforms exactly instead of approximately.
+get their own codes. With S7, "pointwise" and "translate" rotation
+deformers under mesh deformers map back to Part and plain-node transforms
+exactly; "rigid" ones (native models) can only be approximated, with a
+warning.
 
 ## 6. Spec changes this needs (proposed v0.4.0, minor, additive)
 

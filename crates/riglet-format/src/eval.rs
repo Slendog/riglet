@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::bind::TriangleGrid;
 use crate::geometry::{self, Mat2};
-use crate::model::{AxisInterpolation, Combine, Rgb, Vec2};
+use crate::model::{AxisInterpolation, Combine, MeshParent, Rgb, Vec2};
 use crate::rig::{Rig, RigKind, RigNode, RigParam, RigSet};
 
 /// Mesh-deformer bindings (E6): `(node, mesh deformer)` -> bound triangle
@@ -138,6 +138,8 @@ struct Scratch {
     opacity: Vec<f32>,
     visible: Vec<bool>,
     accum: Accum,
+    /// A drawable's points without its own deltas (S7 `deltas: added`).
+    without_deltas: Vec<Vec2>,
 }
 
 /// E2: clamp, or wrap for repeat parameters. Non-finite input means default.
@@ -388,7 +390,7 @@ fn rest_state(node: &RigNode) -> DeformerState {
         RigKind::MeshDeformer { positions, .. } | RigKind::Drawable { positions, .. } => {
             DeformerState { points: positions.clone(), ..Default::default() }
         }
-        RigKind::Rotation { origin, angle, scale } => {
+        RigKind::Rotation { origin, angle, scale, .. } => {
             DeformerState { origin: *origin, angle: *angle, scale: *scale, ..Default::default() }
         }
         _ => DeformerState::default(),
@@ -426,6 +428,9 @@ impl<'a> BindMode<'a, '_> {
                 b.get(&key).map(|v| Cow::Borrowed(v.as_slice()))
             }
             BindMode::Compute(binder) => {
+                if let Some(done) = binder.bindings.get(&key) {
+                    return Some(Cow::Owned(done.clone()));
+                }
                 let mesh = key.1;
                 let RigKind::MeshDeformer { indices, .. } = &binder.nodes.get(mesh)?.kind else { return None };
                 let rest = binder.rest.get(mesh).map_or(&[][..], |s| s.points.as_slice());
@@ -460,40 +465,99 @@ fn frame_change(j: Mat2, j0: Mat2) -> (f32, f32) {
     }
 }
 
+/// Applies `f` to every point of `pts` and, when present, of `pts0`.
+fn for_both(pts: &mut [Vec2], pts0: &mut Option<&mut [Vec2]>, f: impl Fn(Vec2) -> Vec2) {
+    for p in pts.iter_mut() {
+        *p = f(*p);
+    }
+    if let Some(p0) = pts0 {
+        for p in p0.iter_mut() {
+            *p = f(*p);
+        }
+    }
+}
+
 /// E1: maps `pts` (in `node`'s parent space) up through every ancestor
-/// deformer to model space.
+/// deformer to model space. `pts0`, when given, are the same points without
+/// the node's own position deltas; mesh deformers with S7 `deltas: added`
+/// map those and add the difference (E6), and they travel along.
 fn map_up(
     nodes: &[RigNode],
     current: &[DeformerState],
     rest: &[DeformerState],
     node: usize,
     pts: &mut [Vec2],
+    mut pts0: Option<&mut [Vec2]>,
     bind: &mut BindMode<'_, '_>,
 ) {
     let mut owner = nodes.get(node).and_then(|n| n.owner);
+    // S7: the points came through a pointwise or translate rotation
+    // deformer (triangles are walked each frame), and a translate one's
+    // index and origin, carried up to the mesh deformer.
+    let mut walk = false;
+    // (translate deformer, its current origin, its origin without its own
+    // deltas), both carried up in the same frames.
+    let mut translate: Option<(usize, Vec2, Vec2)> = None;
     while let Some(d) = owner {
         let (Some(dn), Some(cur)) = (nodes.get(d), current.get(d)) else { return };
         let rest_d = rest.get(d);
         match &dn.kind {
             RigKind::Warp { rows, cols, .. } => {
-                for p in pts.iter_mut() {
-                    *p = geometry::warp(&cur.points, *rows, *cols, *p).0;
+                for_both(pts, &mut pts0, |p| geometry::warp(&cur.points, *rows, *cols, p).0);
+                if let Some((_, o, o0)) = &mut translate {
+                    *o = geometry::warp(&cur.points, *rows, *cols, *o).0;
+                    *o0 = geometry::warp(&cur.points, *rows, *cols, *o0).0;
                 }
                 owner = dn.owner;
             }
-            RigKind::MeshDeformer { indices, .. } => {
+            RigKind::MeshDeformer { indices, deltas_added, neighbors, .. } => {
                 let rest_pts = rest_d.map_or(&[][..], |r| r.points.as_slice());
-                if let Some(tris) = bind.get((node, d), pts) {
-                    for (p, &tri) in pts.iter_mut().zip(tris.iter()) {
-                        let tri = tri as usize;
-                        let r = geometry::triangle(rest_pts, indices, tri);
-                        let c = geometry::triangle(&cur.points, indices, tri);
-                        *p = geometry::triangle_map(r, c, *p);
+                let map = |p: Vec2, tri: u32| {
+                    let tri = tri as usize;
+                    let r = geometry::triangle(rest_pts, indices, tri);
+                    let c = geometry::triangle(&cur.points, indices, tri);
+                    geometry::triangle_map(r, c, p)
+                };
+                // S7 walk: from the rest-bound triangle toward `p`.
+                let find = |p: Vec2, bound: u32| {
+                    if walk { walk_triangle(rest_pts, indices, neighbors, bound, p) } else { bound }
+                };
+                if let Some((r, o_cur, o_rest)) = translate.take() {
+                    // S7 translate: everything moves by the displacement at
+                    // the translate deformer's origin (without its own
+                    // deltas when this mesh deformer adds deltas).
+                    let o = if *deltas_added { o_rest } else { o_cur };
+                    if let Some(tri) = bind.get((r, d), &[o]).and_then(|t| t.first().copied()) {
+                        let shift = geometry::sub(map(o, find(o, tri)), o);
+                        for_both(pts, &mut pts0, |p| geometry::add(p, shift));
+                    }
+                } else if let Some(tris) = bind.get((node, d), pts) {
+                    match pts0.as_deref_mut() {
+                        // S7 added: T(p0) + (p - p0); p0 keeps excluding the
+                        // deltas; the lookup uses p0 (the point without them).
+                        Some(p0) if *deltas_added => {
+                            for ((p, q), &tri) in pts.iter_mut().zip(p0.iter_mut()).zip(tris.iter()) {
+                                let mapped = map(*q, find(*q, tri));
+                                *p = geometry::add(mapped, geometry::sub(*p, *q));
+                                *q = mapped;
+                            }
+                        }
+                        p0 => {
+                            if let Some(p0) = p0 {
+                                for ((p, q), &tri) in pts.iter().zip(p0.iter_mut()).zip(tris.iter()) {
+                                    *q = map(*q, find(*p, tri));
+                                }
+                            }
+                            for (p, &tri) in pts.iter_mut().zip(tris.iter()) {
+                                *p = map(*p, find(*p, tri));
+                            }
+                        }
                     }
                 }
+                walk = false;
                 owner = dn.owner;
             }
-            RigKind::Rotation { .. } => {
+            RigKind::Rotation { mesh_parent, .. } => {
                 let parent = dn.owner.and_then(|o| nodes.get(o).map(|n| (o, n)));
                 let (base, d_angle, d_scale, next) = match parent {
                     Some((w, wn @ RigNode { kind: RigKind::Warp { rows, cols, .. }, .. })) => {
@@ -503,6 +567,24 @@ fn map_up(
                         let (_, j0) = geometry::warp(rest_w, *rows, *cols, cur.origin);
                         let (da, ds) = frame_change(j, j0);
                         (o, da, ds, wn.owner)
+                    }
+                    // S7 pointwise: map into the mesh deformer's space as if
+                    // it were a group; the mesh deformer then maps each
+                    // point through its own walked triangle (E6).
+                    Some((_, RigNode { kind: RigKind::MeshDeformer { .. }, .. }))
+                        if *mesh_parent == MeshParent::Pointwise =>
+                    {
+                        walk = true;
+                        (cur.origin, 0.0, 1.0, dn.owner)
+                    }
+                    // S7 translate: rigid up to the nearest mesh deformer,
+                    // which then shifts everything by its displacement at
+                    // this origin (it may be above pointwise deformers).
+                    _ if *mesh_parent == MeshParent::Translate => {
+                        walk = true;
+                        let o0 = rest_d.map_or(cur.origin, |r| r.origin);
+                        translate = Some((d, cur.origin, o0));
+                        (cur.origin, 0.0, 1.0, dn.owner)
                     }
                     Some((m, mn @ RigNode { kind: RigKind::MeshDeformer { indices, .. }, .. })) => {
                         let cur_m = current.get(m).map_or(&[][..], |s| s.points.as_slice());
@@ -525,15 +607,60 @@ fn map_up(
                 };
                 // E5: origin + ds * R(angle + dθ) * diag(sx, sy) * p.
                 let [sx, sy] = cur.scale;
-                for p in pts.iter_mut() {
+                let angle = cur.angle + d_angle;
+                let frame = |p: Vec2| {
                     let scaled = [p[0] * sx, p[1] * sy];
-                    *p = geometry::add(base, geometry::scale(geometry::rotate(scaled, cur.angle + d_angle), d_scale));
+                    geometry::add(base, geometry::scale(geometry::rotate(scaled, angle), d_scale))
+                };
+                for_both(pts, &mut pts0, frame);
+                // A translate origin set below travels with the points (this
+                // deformer's own origin is already in its parent space).
+                if let Some((t, o, o0)) = &mut translate
+                    && *t != d
+                {
+                    *o = frame(*o);
+                    *o0 = frame(*o0);
                 }
                 owner = next;
             }
             RigKind::Group { .. } | RigKind::Drawable { .. } => owner = dn.owner,
         }
     }
+}
+
+/// Walk limit for S7 lookups (E6).
+pub const WALK_STEPS: usize = 8;
+
+/// S7 (E6): from triangle `start`, cross the edge opposite the most
+/// negative barycentric coordinate of `p` until a triangle contains `p`
+/// (tolerance 1e-6), the mesh boundary or a degenerate triangle is reached,
+/// or after WALK_STEPS moves. O(WALK_STEPS) per point.
+fn walk_triangle(rest: &[Vec2], indices: &[u32], neighbors: &[[u32; 3]], start: u32, p: Vec2) -> u32 {
+    let mut t = start;
+    for _ in 0..WALK_STEPS {
+        let Some(l) = geometry::barycentric(geometry::triangle(rest, indices, t as usize), p) else { return t };
+        let (k, &m) = l.iter().enumerate().min_by(|a, b| a.1.total_cmp(b.1)).unwrap_or((0, &0.0));
+        if m >= -1e-6 {
+            return t;
+        }
+        match neighbors.get(t as usize).and_then(|n| n.get(k)).copied() {
+            Some(n) if n != u32::MAX => t = n,
+            _ => return t,
+        }
+    }
+    t
+}
+
+fn adds_deltas_above(nodes: &[RigNode], node: usize) -> bool {
+    let mut owner = nodes.get(node).and_then(|n| n.owner);
+    while let Some(o) = owner {
+        let Some(n) = nodes.get(o) else { return false };
+        if matches!(n.kind, RigKind::MeshDeformer { deltas_added: true, .. }) {
+            return true;
+        }
+        owner = n.owner;
+    }
+    false
 }
 
 /// Rest geometry of every node, computed once per rig.
@@ -561,7 +688,7 @@ pub(crate) fn compute_bindings(
     let mut binder = Binder { bindings: Bindings::new(), grids: HashMap::new(), rest, nodes, budget, exceeded: false };
     for (i, node) in nodes.iter().enumerate() {
         if let Some(mut pts) = node.kind.rest_points() {
-            map_up(nodes, rest, rest, i, &mut pts, &mut BindMode::Compute(&mut binder));
+            map_up(nodes, rest, rest, i, &mut pts, None, &mut BindMode::Compute(&mut binder));
             if binder.exceeded {
                 return Err(BindingLimitExceeded);
             }
@@ -577,7 +704,7 @@ impl Rig {
     pub fn evaluate(&self, params: &ParamValues, out: &mut EvalOutput) {
         let nodes = &self.nodes;
         let rest = &self.rest_states;
-        let Scratch { values, current, opacity, visible, accum } = &mut out.scratch;
+        let Scratch { values, current, opacity, visible, accum, without_deltas } = &mut out.scratch;
 
         values.clear();
         values.extend(
@@ -664,7 +791,17 @@ impl Rig {
             if let Some(state) = current.get(node) {
                 frame.positions.extend_from_slice(&state.points);
             }
-            map_up(nodes, current, rest, node, &mut frame.positions, &mut bind);
+            // S7: track the points without their own deltas only when a
+            // mesh deformer above adds them.
+            let mut track = None;
+            if adds_deltas_above(nodes, node) {
+                without_deltas.clear();
+                if let Some(r) = rest.get(node) {
+                    without_deltas.extend_from_slice(&r.points);
+                }
+                track = Some(without_deltas.as_mut_slice());
+            }
+            map_up(nodes, current, rest, node, &mut frame.positions, track, &mut bind);
         }
 
         for (frame, &node) in out.composites.iter_mut().zip(&self.composites) {

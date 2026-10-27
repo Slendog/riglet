@@ -21,8 +21,7 @@ enum Class {
     NoMeshGroup,
     /// Drawable chain straight from the MeshGroup, all transforms static.
     Direct,
-    /// Drawable chain with an animated transform (the importer maps it with
-    /// a rigid rotation deformer: MESHGROUP_TRANSFORM_APPROXIMATED).
+    /// Drawable chain with an animated transform (S7 pointwise).
     Animated,
     /// A plain Node (or non-propagating composite) between: Inochi2D's
     /// MeshGroup doesn't reach the drawable (at most translates the node).
@@ -89,11 +88,14 @@ fn meshgroup_error() {
         // updating disabled subtrees), classified by the path from the
         // nearest MeshGroup ancestor down to the drawable (MeshGroup.setGroup
         // recurses only through drawables and propagating composites).
-        let flagged: HashSet<u32> = import
-            .warnings
-            .iter()
-            .filter(|w| w.code == "MESHGROUP_TRANSFORM_APPROXIMATED")
-            .filter_map(|w| w.object_id.as_deref()?.strip_prefix("inochi:")?.parse().ok())
+        // Nodes with transform bindings (animated transforms).
+        let flagged: HashSet<u32> = json["param"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|p| p["bindings"].as_array().into_iter().flatten())
+            .filter(|b| b["param_name"].as_str().is_some_and(|n| n.starts_with("transform.")))
+            .filter_map(|b| b["node"].as_u64().map(|u| u as u32))
             .collect();
         let mut compare: Vec<(u32, Class)> = Vec::new();
         let mut stack = vec![(0usize, Class::NoMeshGroup)];
@@ -154,12 +156,14 @@ fn meshgroup_error() {
         // undeformed, Riglet extrapolates) counted separately.
         let mut errs: BTreeMap<String, Vec<f32>> = BTreeMap::new();
         let mut errs_fixed: BTreeMap<String, Vec<f32>> = BTreeMap::new();
+        let mut errs_frame: BTreeMap<String, Vec<f32>> = BTreeMap::new();
         let mut per_param: BTreeMap<String, (f32, u32)> = BTreeMap::new();
         let mut per_drawable: HashMap<u32, f32> = HashMap::new();
         let mut defaults_max = 0.0f32;
         for (label, values) in &samples {
             let inochi = puppet.evaluate(values);
             let variant = puppet.evaluate_with(values, Some(&fixed));
+            let per_frame = puppet.evaluate_e6_per_frame(values);
             let mut p = ParamValues::defaults(&rig);
             for (uuid, v) in values {
                 assert!(p.set(&rig, &format!("inochi:{uuid}"), *v));
@@ -188,9 +192,11 @@ fn meshgroup_error() {
                         None => "",
                     };
                     errs.entry(format!("{key}{mg}")).or_default().push(e);
-                    if let Some(vp) = variant.get(&uuid).and_then(|x| x.positions.get(k)) {
-                        let ev = ((vp[0] - b[0]).powi(2) + (vp[1] - b[1]).powi(2)).sqrt();
-                        errs_fixed.entry(format!("{key}{mg}")).or_default().push(ev);
+                    for (src, dst) in [(&variant, &mut errs_fixed), (&per_frame, &mut errs_frame)] {
+                        if let Some(vp) = src.get(&uuid).and_then(|x| x.positions.get(k)) {
+                            let ev = ((vp[0] - b[0]).powi(2) + (vp[1] - b[1]).powi(2)).sqrt();
+                            dst.entry(format!("{key}{mg}")).or_default().push(ev);
+                        }
                     }
                     if key == "animated transform" && e > sample_max.0 {
                         sample_max = (e, uuid);
@@ -232,15 +238,20 @@ fn meshgroup_error() {
                 percentile(v, 0.99)
             );
         }
-        println!("   per-vertex, triangles bound at rest by E6, vs Inochi2D (reference variant):");
-        for (label, v) in &mut errs_fixed {
-            let max = v.iter().copied().fold(0.0f32, f32::max);
-            println!(
-                "   {label:20} {:8} vertex-samples   max {max:8.3} px   p95 {:8.3} px   p99 {:8.3} px",
-                v.len(),
-                percentile(v, 0.95),
-                percentile(v, 0.99)
-            );
+        for (title, errs) in [
+            ("per-vertex, triangles bound at rest by E6 (S7), vs Inochi2D (reference variant):", &mut errs_fixed),
+            ("per-vertex, E6 triangle chosen every frame at the current position, vs Inochi2D:", &mut errs_frame),
+        ] {
+            println!("   {title}");
+            for (label, v) in errs.iter_mut() {
+                let max = v.iter().copied().fold(0.0f32, f32::max);
+                println!(
+                    "   {label:20} {:8} vertex-samples   max {max:8.3} px   p95 {:8.3} px   p99 {:8.3} px",
+                    v.len(),
+                    percentile(v, 0.95),
+                    percentile(v, 0.99)
+                );
+            }
         }
         let mut params: Vec<_> = per_param.into_iter().collect();
         params.sort_by(|a, b| b.1.0.total_cmp(&a.1.0));

@@ -14,7 +14,7 @@ use crate::limits::Limits;
 use crate::migrate::{CURRENT_SCHEMA_VERSION, FORMAT_NAME};
 use crate::model::{
     AxisInterpolation, BlendMode, BufferRef, Combine, CurveInterp, Id, Keyform, KeyformSet, MaskMode, MaskRef,
-    MotionTarget, Node, ParamAxis, ParamKind, Rgb, Vec2,
+    MeshDeltas, MeshParent, MotionTarget, Node, ParamAxis, ParamKind, Rgb, Vec2,
 };
 use crate::package::{Document, check_package_path};
 
@@ -107,10 +107,17 @@ pub enum RigKind {
         angle: f32,
         /// Per axis (S1).
         scale: Vec2,
+        /// S7; only used when the owner is a mesh deformer.
+        mesh_parent: MeshParent,
     },
     MeshDeformer {
         positions: Vec<Vec2>,
         indices: Vec<u32>,
+        /// S7: children's own position deltas are added after the map.
+        deltas_added: bool,
+        /// Per triangle, the triangle across the edge opposite each corner
+        /// (`u32::MAX` at the boundary), for the S7 walk (E6).
+        neighbors: Vec<[u32; 3]>,
     },
 }
 
@@ -767,7 +774,16 @@ impl Validator<'_> {
                     self.issue("V8_NON_FINITE", Some(id), "rest values are not finite");
                     return None;
                 }
-                Some(RigKind::Rotation { origin: rest.origin, angle: rest.angle, scale: rest.scale.xy() })
+                let mesh_parent = r.mesh_parent.unwrap_or_default();
+                if !mesh_parent_allowed(mesh_parent, owner, built) {
+                    self.issue(
+                        "V2_MESH_PARENT",
+                        Some(id),
+                        "meshParent pointwise needs a mesh deformer as the nearest deformer ancestor; translate \
+                         needs one above it through rotation deformers only, the one directly under it pointwise",
+                    );
+                }
+                Some(RigKind::Rotation { origin: rest.origin, angle: rest.angle, scale: rest.scale.xy(), mesh_parent })
             }
             Node::MeshDeformer(m) => {
                 let positions = self.vec2s(&m.mesh.positions, id, "positions")?;
@@ -782,7 +798,9 @@ impl Validator<'_> {
                         return None;
                     }
                 }
-                Some(RigKind::MeshDeformer { positions, indices })
+                let deltas_added = m.deltas == Some(MeshDeltas::Added);
+                let neighbors = triangle_neighbors(&indices);
+                Some(RigKind::MeshDeformer { positions, indices, deltas_added, neighbors })
             }
         };
 
@@ -1082,4 +1100,56 @@ impl Validator<'_> {
             self.issue("V3_UNRESOLVED", Some(&k), "export id refers to an unknown parameter or node");
         }
     }
+}
+
+/// S7 (V2): pointwise needs a mesh deformer as the owner; translate needs a
+/// mesh deformer above, through rotation deformers only, where the one
+/// directly under the mesh deformer is this one or pointwise.
+fn mesh_parent_allowed(mode: MeshParent, owner: Option<usize>, built: &[Option<RigNode>]) -> bool {
+    let kind_of = |i: usize| built.get(i).and_then(|n| n.as_ref()).map(|n| (&n.kind, n.owner));
+    match mode {
+        MeshParent::Rigid => true,
+        MeshParent::Pointwise => {
+            owner.and_then(kind_of).is_some_and(|(k, _)| matches!(k, RigKind::MeshDeformer { .. }))
+        }
+        MeshParent::Translate => {
+            // `None` until a rotation deformer is passed (then this one is
+            // directly under the mesh deformer).
+            let mut below: Option<MeshParent> = None;
+            let mut cur = owner;
+            while let Some((kind, up)) = cur.and_then(kind_of) {
+                match kind {
+                    RigKind::MeshDeformer { .. } => return matches!(below, None | Some(MeshParent::Pointwise)),
+                    RigKind::Rotation { mesh_parent, .. } if *mesh_parent != MeshParent::Translate => {
+                        below = Some(*mesh_parent);
+                    }
+                    _ => return false,
+                }
+                cur = up;
+            }
+            false
+        }
+    }
+}
+
+/// For each triangle, the lowest-index other triangle sharing the edge
+/// opposite each corner, or `u32::MAX`.
+fn triangle_neighbors(indices: &[u32]) -> Vec<[u32; 3]> {
+    let tris = indices.len() / 3;
+    let corner = |t: usize, k: usize| indices.get(t * 3 + k).copied().unwrap_or(0);
+    let key = |a: u32, b: u32| (a.min(b), a.max(b));
+    let mut edges: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+    for t in 0..tris {
+        for k in 0..3 {
+            edges.entry(key(corner(t, (k + 1) % 3), corner(t, (k + 2) % 3))).or_default().push(t as u32);
+        }
+    }
+    (0..tris)
+        .map(|t| {
+            [0, 1, 2].map(|k| {
+                let e = key(corner(t, (k + 1) % 3), corner(t, (k + 2) % 3));
+                edges.get(&e).and_then(|v| v.iter().copied().filter(|&o| o != t as u32).min()).unwrap_or(u32::MAX)
+            })
+        })
+        .collect()
 }

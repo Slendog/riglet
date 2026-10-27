@@ -383,6 +383,34 @@ pub struct RotationDeformerNode {
     #[serde(flatten)]
     pub base: NodeBase,
     pub rest: RotationRest,
+    /// S7: how it follows a mesh-deformer parent (E5); default rigid.
+    #[serde(default, rename = "meshParent", skip_serializing_if = "Option::is_none")]
+    pub mesh_parent: Option<MeshParent>,
+}
+
+/// S7 (E5): how a rotation deformer whose parent is a mesh deformer
+/// follows it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MeshParent {
+    /// Origin follows its triangle; rotation and scale follow the
+    /// triangle's Jacobian; the frame stays rigid.
+    #[default]
+    Rigid,
+    /// Only the origin follows its triangle.
+    Translate,
+    /// Every point goes through its own bound triangle (like a warp's).
+    Pointwise,
+}
+
+/// S7 (E6): whether a mesh deformer maps its children's own position
+/// deltas through the triangle ("mapped", default) or adds them after it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MeshDeltas {
+    #[default]
+    Mapped,
+    Added,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -422,6 +450,9 @@ pub struct MeshDeformerNode {
     pub base: NodeBase,
     pub mesh: DeformerMesh,
     pub rest: OpacityRest,
+    /// S7 (E6); default mapped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deltas: Option<MeshDeltas>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

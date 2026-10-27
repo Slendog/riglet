@@ -7,7 +7,7 @@ normative text; entries here record the reasoning.
 
 ---
 
-## v0.4.0 — Inochi2D-driven additions (status: ACCEPTED S1, S2, S4, 2026-10-27; S5, S6, R2 border and blend group (a) ACCEPTED 2026-10-27 after the M3 import review; S7 PROPOSED)
+## v0.4.0 — Inochi2D-driven additions (status: ACCEPTED S1, S2, S4, 2026-10-27; S5, S6, R2 border and blend group (a) ACCEPTED 2026-10-27 after the M3 import review; S7 ACCEPTED 2026-10-27)
 
 Additive (minor) changes needed for exact Inochi2D import. Migration from
 0.3.x: none. v0.4.0 had not been released when S5-S6, R2 and group (a)
@@ -62,25 +62,28 @@ were folded in, so they stay in 0.4.0 instead of a 0.5.0.
   SoftLight, Difference) stay in Known gaps.
 - **Known gaps:** Live2D export must merge or approximate S1 and S2 with
   warnings.
-- **S7 (PROPOSED, not in the spec): how a rotation deformer follows a
-  mesh deformer parent.** `RotationDeformerNode.meshParent?: "rigid" |
-  "translate" | "pointwise"` (default "rigid" = today's E5). "translate":
-  only the origin follows the bound triangle (dθ = 0, ds = 1), which is
-  Inochi2D's `translate_children` for plain nodes. "pointwise": E5 maps the
-  points into the mesh deformer's space, then every point goes through
-  its own triangle, bound at rest through the rest chain like a warp's
-  points (E6); this is Inochi2D's per-vertex MeshGroup filtering of parts
-  with animated transforms. Measured on Midori (Inochi2D 0.8.7 reference
-  in `crates/riglet-inochi2d/tests/reference/`, 541 parameter samples):
-  today's rigid mapping is off by p95 70 px / p99 118 px / max 257 px on
-  the 65 affected drawables (parameters Head and Body Yaw-Pitch, Roll);
-  "pointwise" with the E6 rest binding gives p95 0.3 px / p99 2.8 px under
-  dynamic MeshGroups. Under MeshGroups without dynamic_deformation it is
-  p95 6 px / p99 19 px, because there Inochi2D adds the child's own
-  deformation after the map (E6 maps it); an optional
-  `MeshDeformerNode.deltas?: "mapped" | "added"` would close that too.
-  Points Inochi2D leaves undeformed (its rest bitmask misses them; ~0.4%
-  of vertex samples) stay approximated (`MESHGROUP_OUTSIDE_POINTS`).
+- **S7. Rotation deformers under mesh deformers; mesh delta modes
+  (ACCEPTED 2026-10-27).** `RotationDeformerNode.meshParent: "rigid" |
+  "translate" | "pointwise"` (default rigid = the old E5) and
+  `MeshDeformerNode.deltas: "mapped" | "added"` (default mapped = the old
+  E6), so every existing file behaves as before. Rules in E5, E6 and V2.
+  - Triangle choice: points that reach a mesh deformer through a
+    pointwise (or translate) rotation deformer re-find their triangle
+    every frame by a bounded walk (at most 8 edge crossings from the
+    rest-bound triangle, neighbor lists built at load: O(1) per point and
+    frame). Measured on Midori against the Inochi2D 0.8.7 reference
+    (`crates/riglet-inochi2d/tests/reference/`, 541 parameter samples):
+    the walk reproduces a full per-frame lookup (walk limit 2: max 44 px,
+    4: max 12.6 px, 8 and 16: max 0.6 px), while the alternative, keeping
+    the triangle bound at rest (plain E6), leaves p95 0.3 px / p99 2.8 px /
+    max 87 px under dynamic MeshGroups and max 63 px under static ones.
+  - Result after import with S7 (Midori): max 0.61 px on every vertex
+    sample Inochi2D deforms, p95 and p99 0.000 px (before S7: p95 70 px,
+    p99 118 px, max 257 px). Aka: max 0.82 px (its x/y rotation, S6).
+  - Not reproduced (an Inochi2D quirk, documented in E6): points its rest
+    bitmask misses stay undeformed in Inochi2D and extrapolate in Riglet:
+    about 0.4% of vertex samples, p95 8-132 px there; the importer warns
+    MESHGROUP_OUTSIDE_POINTS.
 ---
 
 ## v0.3.0 — rendering semantics and composite fields (status: ACCEPTED with amendments, 2026-10-27)

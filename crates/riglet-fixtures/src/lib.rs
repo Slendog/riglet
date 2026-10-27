@@ -271,6 +271,7 @@ impl Builder {
         self.insert(Node::Rotation(RotationDeformerNode {
             base: base(id, parent),
             rest: RotationRest { origin, angle, scale: scale.into(), opacity: 1.0 },
+            mesh_parent: None,
         }));
         self
     }
@@ -282,6 +283,7 @@ impl Builder {
             base: base(id, parent),
             mesh: DeformerMesh { positions: pos, indices: idx },
             rest: OpacityRest { opacity: 1.0 },
+            deltas: None,
         }));
         self
     }

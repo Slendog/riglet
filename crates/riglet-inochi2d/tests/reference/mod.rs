@@ -536,6 +536,12 @@ impl Puppet {
         p.evaluate_with(&HashMap::new(), Some(&E6_MARKER.with(|m| m.clone())))
     }
 
+    /// Variant: E6's triangle choice made at every frame, at the point's
+    /// current position (instead of Inochi2D's bitmask).
+    pub fn evaluate_e6_per_frame(&self, values: &HashMap<u32, V2>) -> HashMap<u32, Evaluated> {
+        self.evaluate_with(values, Some(&E6_MARKER.with(|m| m.clone())))
+    }
+
     fn clone_without_bindings(&self) -> Puppet {
         Puppet {
             nodes: self.nodes.clone(),
@@ -749,10 +755,7 @@ impl Puppet {
         inv[2][3] = 0.0;
         let mut res = deform.to_vec();
         for (k, v) in verts.iter().enumerate() {
-            // The variant (fixed triangles) uses Riglet's E6 delta rule: the
-            // current local position, deltas included, goes through the map.
-            let variant = fixed.is_some() || e6;
-            let src = if dynamic || variant { [v[0] + deform[k][0], v[1] + deform[k][1]] } else { *v };
+            let src = if dynamic { [v[0] + deform[k][0], v[1] + deform[k][1]] } else { *v };
             let c3 = apply(&center, [src[0], src[1], 0.0]);
             let c = [c3[0], c3[1]];
             let mut index: i64 = -1;
@@ -773,10 +776,6 @@ impl Puppet {
             }
             if dynamic {
                 res[k] = [new[0] - v[0], new[1] - v[1]];
-            } else if variant {
-                let cv = apply(&center, [v[0], v[1], 0.0]);
-                let d = apply(&inv, [new[0] - cv[0], new[1] - cv[1], 0.0]);
-                res[k] = [d[0], d[1]];
             } else {
                 let d = apply(&inv, [new[0] - c[0], new[1] - c[1], 0.0]);
                 res[k][0] += d[0];

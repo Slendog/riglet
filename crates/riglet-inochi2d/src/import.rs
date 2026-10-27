@@ -195,8 +195,6 @@ struct Reach {
     translate_children: bool,
     /// A node on the way is hidden (its visibility must carry over).
     hidden: bool,
-    /// The reaching MeshGroup's mesh deformer, when it is not dynamic.
-    static_mesh: Option<Id>,
 }
 
 struct Importer<'a> {
@@ -215,8 +213,6 @@ struct Importer<'a> {
     mask_thresholds: HashMap<u32, f32>,
     /// Nodes whose transform is animated (need a rotation deformer).
     animated_transform: HashSet<u32>,
-    /// Nodes with deform bindings.
-    deformed: HashSet<u32>,
     placeholder: HashMap<&'static str, Id>,
     /// (rotation deformer, its rigid twin outside the mesh deformers): the
     /// twin gets a copy of the original's keyform sets after the bindings.
@@ -224,7 +220,6 @@ struct Importer<'a> {
     /// Per mesh deformer: the bake of its MeshGroup (Riglet coordinates =
     /// bake applied to the MeshGroup's local coordinates).
     mesh_bakes: HashMap<Id, Affine>,
-    static_deform_warned: HashSet<Id>,
     /// Per node and axis (x = 0, y = 1): how many rest values and bindings
     /// rotate it, and the largest angle (radians).
     rot3_used: HashMap<u32, BTreeMap<usize, (u32, f32)>>,
@@ -522,19 +517,6 @@ impl Importer<'_> {
                 None => (frame, visible, false, false),
             };
 
-            if reached
-                && self.deformed.contains(&uuid)
-                && let Some(mesh) = reach.as_ref().and_then(|r| r.static_mesh.clone())
-                && self.static_deform_warned.insert(mesh.clone())
-            {
-                self.warn(
-                    "MESHGROUP_DEFORM_APPROXIMATED",
-                    Some(&mesh),
-                    "a MeshGroup without dynamic_deformation adds its children's own deformation after its map; \
-                     Riglet maps the deformed positions (E6)",
-                );
-            }
-
             // Under a MeshGroup, static transforms are baked into vertices
             // (exact); animated ones need a rigid rotation deformer.
             let mut created: Vec<Id> = Vec::new();
@@ -543,33 +525,55 @@ impl Importer<'_> {
                     (frame, Some(outer.then(Affine::trs([t[0], t[1]], r[2], s))))
                 }
                 Some(outer) => {
-                    if translated {
+                    // S7: the frame directly under a mesh deformer follows it
+                    // "translate" (translate_children: only the node's
+                    // translation moves) or "pointwise" (Inochi2D filters
+                    // every vertex of reached drawables).
+                    let mode = if translated {
+                        MeshParent::Translate
+                    } else if reached {
+                        MeshParent::Pointwise
+                    } else {
+                        MeshParent::Rigid
+                    };
+                    let under_mesh = self.owner_is_mesh(&frame);
+                    // Translate also works from inside a pointwise frame
+                    // (a translate_children node under an animated part).
+                    let translate_ok = under_mesh || self.inside_pointwise(&frame);
+                    let baked = outer != Affine::IDENTITY;
+                    if translated && !translate_ok {
                         self.warn(
                             "MESHGROUP_TRANSLATE_APPROXIMATED",
                             Some(&id),
-                            "Inochi2D's MeshGroup only translates this node (translate_children); Riglet also \
-                             rotates and scales it with the mesh around its origin",
-                        );
-                    } else if reached {
-                        self.warn(
-                            "MESHGROUP_TRANSFORM_APPROXIMATED",
-                            Some(&id),
-                            "an animated transform under a MeshGroup is mapped rigidly; Inochi2D deforms each vertex",
+                            "translate_children: this node can't follow the MeshGroup by translation only here; \
+                             mapped rigidly",
                         );
                     }
                     // The baked static ancestors become one static rotation
                     // deformer, so this transform and its bindings stay in
-                    // their own local frame.
-                    let parent = if outer == Affine::IDENTITY {
-                        frame
-                    } else {
+                    // their own local frame. The outermost of the two follows
+                    // the mesh deformer.
+                    // A bake frame directly under the mesh deformer is
+                    // pointwise, so a translate node below it stays valid.
+                    let bake_mode = match mode {
+                        MeshParent::Translate | MeshParent::Pointwise if under_mesh => Some(MeshParent::Pointwise),
+                        _ => None,
+                    };
+                    let parent = if baked {
                         let bid = format!("{id}:bake");
-                        self.bake_frame(&bid, &name, &frame, outer)?;
+                        self.bake_frame(&bid, &name, &frame, outer, bake_mode)?;
                         created.push(bid.clone());
                         bid
+                    } else {
+                        frame
                     };
                     let rid = format!("{id}:transform");
-                    self.rotation(&rid, &name, &parent, visible, t, r[2], s)?;
+                    let own_mode = match mode {
+                        MeshParent::Translate if translate_ok => Some(MeshParent::Translate),
+                        MeshParent::Pointwise if under_mesh && !baked => Some(MeshParent::Pointwise),
+                        _ => None,
+                    };
+                    self.rotation(&rid, &name, &parent, visible, t, r[2], s, own_mode)?;
                     m.transform = Some(rid.clone());
                     created.push(rid.clone());
                     (rid, Some(Affine::IDENTITY))
@@ -577,7 +581,7 @@ impl Importer<'_> {
                 None if identity && !animated => (frame, None),
                 None => {
                     let rid = format!("{id}:transform");
-                    self.rotation(&rid, &name, &frame, visible, t, r[2], s)?;
+                    self.rotation(&rid, &name, &frame, visible, t, r[2], s, None)?;
                     m.transform = Some(rid.clone());
                     (rid, None)
                 }
@@ -709,7 +713,6 @@ impl Importer<'_> {
                             chain,
                             translate_children: flag(v, "translate_children", false),
                             hidden: reach.as_ref().is_some_and(|r| reached && r.hidden) || !visible,
-                            static_mesh: (!flag(v, "dynamic_deformation", false)).then(|| mid.clone()),
                         });
                         child_frame = mid;
                     } else {
@@ -794,8 +797,9 @@ impl Importer<'_> {
                 let corner = [p[0].floor(), p[1].floor()];
                 inside && tris.iter().any(|&t| in_tri(corner, t))
             };
-            // Drawables reached through groups only (rotation deformers map
-            // their points rigidly, see MESHGROUP_TRANSFORM_APPROXIMATED).
+            // Drawables reached through groups only: points under rotation
+            // deformers move relative to the mesh, so a rest check says
+            // little about them.
             let mut outside = 0usize;
             let mut stack: Vec<&Id> = m.base.children.iter().collect();
             while let Some(c) = stack.pop() {
@@ -827,7 +831,14 @@ impl Importer<'_> {
 
     /// A static rotation deformer equal to `b` (rotation and signed per-axis
     /// scale, S6; a shear can't be expressed and is approximated).
-    fn bake_frame(&mut self, id: &str, name: &str, parent: &str, b: Affine) -> Result<(), InochiError> {
+    fn bake_frame(
+        &mut self,
+        id: &str,
+        name: &str,
+        parent: &str,
+        b: Affine,
+        mesh_parent: Option<MeshParent>,
+    ) -> Result<(), InochiError> {
         let [x, y, t] = b.m;
         let angle = x[1].atan2(x[0]);
         let (sin, cos) = angle.sin_cos();
@@ -841,7 +852,7 @@ impl Importer<'_> {
                 "static transforms above this node combine to a shear, approximated",
             );
         }
-        self.rotation(id, name, parent, true, [t[0], t[1], 0.0], angle, [sx, sy])
+        self.rotation(id, name, parent, true, [t[0], t[1], 0.0], angle, [sx, sy], mesh_parent)
     }
 
     /// The frame for a blocked node: `r.outside` with rigid twins of the
@@ -854,7 +865,7 @@ impl Importer<'_> {
                 let Some(Node::Rotation(orig)) = self.nodes.get(rid).cloned() else { continue };
                 let mut b = base(&tid, &orig.base.name, Some(&parent), orig.base.visible);
                 set_ext(&mut b, serde_json::json!({ "twinOf": rid }));
-                self.insert(Node::Rotation(RotationDeformerNode { base: b, rest: orig.rest }))?;
+                self.insert(Node::Rotation(RotationDeformerNode { base: b, rest: orig.rest, mesh_parent: None }))?;
                 self.twins.push((rid.clone(), tid.clone()));
             }
             parent = tid;
@@ -869,6 +880,37 @@ impl Importer<'_> {
                 n.base_mut().keyform_sets = sets;
             }
         }
+    }
+
+    /// Whether the nearest deformer at or above `frame` is a pointwise
+    /// rotation deformer under a mesh deformer (through rigid rotations).
+    fn inside_pointwise(&self, frame: &str) -> bool {
+        let mut cur = Some(frame.to_owned());
+        while let Some(id) = cur {
+            match self.nodes.get(&id) {
+                Some(Node::Group(g)) => cur = g.base.parent.clone(),
+                Some(Node::Rotation(r)) => match r.mesh_parent {
+                    Some(MeshParent::Pointwise) => return true,
+                    Some(MeshParent::Translate) => return false,
+                    _ => cur = r.base.parent.clone(),
+                },
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    /// Whether the nearest deformer at or above `frame` is a mesh deformer.
+    fn owner_is_mesh(&self, frame: &str) -> bool {
+        let mut cur = Some(frame.to_owned());
+        while let Some(id) = cur {
+            match self.nodes.get(&id) {
+                Some(Node::MeshDeformer(_)) => return true,
+                Some(Node::Group(g)) => cur = g.base.parent.clone(),
+                _ => return false,
+            }
+        }
+        false
     }
 
     /// Records a rotation about x or y; true when the axis already had one.
@@ -970,11 +1012,13 @@ impl Importer<'_> {
         t: [f32; 3],
         rz: f32,
         s: Vec2,
+        mesh_parent: Option<MeshParent>,
     ) -> Result<(), InochiError> {
         let scale = if s[0] == s[1] { Scale::Uniform(s[0]) } else { Scale::PerAxis(s) };
         self.insert(Node::Rotation(RotationDeformerNode {
             base: base(id, name, Some(parent), visible),
             rest: RotationRest { origin: [t[0], t[1]], angle: rz.to_degrees(), scale, opacity: 1.0 },
+            mesh_parent,
         }))
     }
 
@@ -1130,6 +1174,9 @@ impl Importer<'_> {
             base: base(id, name, Some(parent), visible),
             mesh,
             rest: OpacityRest { opacity: 1.0 },
+            // S7: without dynamic_deformation Inochi2D adds a child's own
+            // deformation after the map.
+            deltas: (!flag(v, "dynamic_deformation", false)).then_some(MeshDeltas::Added),
         }))?;
         Ok(Some(count))
     }
@@ -1238,8 +1285,6 @@ impl Importer<'_> {
                 let Some(u) = uuid(b, "node") else { continue };
                 if name.starts_with("transform.") {
                     self.animated_transform.insert(u);
-                } else if name == "deform" {
-                    self.deformed.insert(u);
                 }
             }
         }
@@ -1914,11 +1959,9 @@ pub fn import(bytes: &[u8], options: &Options) -> Result<Import, InochiError> {
         pending_masks: Vec::new(),
         mask_thresholds: HashMap::new(),
         animated_transform: HashSet::new(),
-        deformed: HashSet::new(),
         placeholder: HashMap::new(),
         twins: Vec::new(),
         mesh_bakes: HashMap::new(),
-        static_deform_warned: HashSet::new(),
         rot3_used: HashMap::new(),
     };
     im.textures(c.textures)?;
