@@ -132,7 +132,7 @@ depends on format + render + converters. Only the editor depends on egui.
   never exact equality. Results differ slightly between x86_64 and arm64.
 - **GPU in tests:** headless render tests must run without a real GPU: CI
   uses Mesa lavapipe (Linux), WARP (Windows), and Metal (macOS).
-- **Golden images:** render tests use a per-channel tolerance (4/255) plus
+- **Golden images:** render tests use a per-channel tolerance (8/255) plus
   a maximum fraction of differing pixels (0.5%), because GPU backends
   rasterize slightly differently. Fixtures are Rust code in
   `crates/riglet-fixtures/src/fixtures.rs` (one per rendering feature);
@@ -146,7 +146,9 @@ depends on format + render + converters. Only the editor depends on egui.
   - **Required on Linux:** CI installs lavapipe and sets
     `RIGLET_REQUIRE_GPU=1`, so a missing adapter fails the job. Elsewhere,
     render tests print `SKIPPED` without an adapter; every job writes its
-    adapter (or SKIPPED) to the run summary.
+    adapter (or SKIPPED) to the run summary. Never set `WGPU_BACKEND` to an
+    empty string: wgpu reads that as "no backends" and every render test
+    silently skips.
   - Mismatching images are uploaded as the `render-failures-<os>`
     artifact.
 - **Editor:** native file dialogs and clipboard via cross-platform crates

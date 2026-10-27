@@ -34,7 +34,6 @@ jobs:
       # never silently hide every render test. Elsewhere render tests use
       # whatever adapter exists (Metal, WARP) or report SKIPPED.
       RIGLET_REQUIRE_GPU: ${{ startsWith(matrix.os, 'ubuntu') && '1' || '0' }}
-      WGPU_BACKEND: ${{ startsWith(matrix.os, 'ubuntu') && 'vulkan' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # rustup is preinstalled on every hosted runner; with no arguments it
@@ -51,6 +50,9 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          # Linux renders on lavapipe (the reference). Elsewhere WGPU_BACKEND
+          # stays UNSET: an empty value means "no backends" to wgpu.
+          if [[ "${{ matrix.os }}" == ubuntu* ]]; then export WGPU_BACKEND=vulkan; fi
           cargo test --workspace -- --nocapture 2>&1 | tee tests.log
       # Worst-case mesh-deformer binding must be rejected fast in release.
       - run: cargo test --release -p riglet-format --test binding -- --ignored
@@ -58,7 +60,7 @@ jobs:
         if: always()
         shell: bash
         run: |
-          line=$(grep -m1 -E 'render tests: (adapter|SKIPPED)' tests.log 2>/dev/null || echo 'render tests: did not run')
+          line=$(grep -m1 -E '^render tests: (adapter|SKIPPED)' tests.log 2>/dev/null || echo 'render tests: did not run')
           cli=$(grep -c 'cli render tests: SKIPPED' tests.log 2>/dev/null || true)
           echo "${{ matrix.os }}: $line (CLI render tests skipped: ${cli:-0})"
           echo "- **${{ matrix.os }}**: ${line#render tests: } (CLI render tests skipped: ${cli:-0})" >> "$GITHUB_STEP_SUMMARY"
