@@ -1,0 +1,351 @@
+{
+  "canvas": {
+    "width": 512.0,
+    "height": 512.0
+  },
+  "textures": [
+    {
+      "id": "tex",
+      "file": "textures/t.png",
+      "width": 1,
+      "height": 1,
+      "premultipliedAlpha": true
+    }
+  ],
+  "parameters": [
+    {
+      "id": "p",
+      "name": "p",
+      "kind": "1d",
+      "min": [
+        0.0
+      ],
+      "max": [
+        1.0
+      ],
+      "default": [
+        0.0
+      ]
+    },
+    {
+      "id": "q",
+      "name": "q",
+      "kind": "1d",
+      "min": [
+        -1.0
+      ],
+      "max": [
+        1.0
+      ],
+      "default": [
+        0.0
+      ]
+    }
+  ],
+  "root": "root",
+  "nodes": {
+    "d": {
+      "type": "drawable",
+      "id": "d",
+      "name": "d",
+      "parent": "r",
+      "children": [],
+      "visible": true,
+      "keyformSets": [
+        {
+          "axes": [
+            {
+              "param": {
+                "parameter": "p",
+                "component": 0
+              },
+              "keys": [
+                0.0,
+                1.0
+              ],
+              "interpolation": "linear"
+            }
+          ],
+          "keyforms": [
+            {
+              "positions": {
+                "file": "buffers/data.bin",
+                "byteOffset": 176,
+                "count": 3,
+                "type": "f32",
+                "components": 2
+              }
+            },
+            {
+              "positions": {
+                "file": "buffers/data.bin",
+                "byteOffset": 200,
+                "count": 3,
+                "type": "f32",
+                "components": 2
+              }
+            }
+          ]
+        }
+      ],
+      "texture": "tex",
+      "mesh": {
+        "positions": {
+          "file": "buffers/data.bin",
+          "byteOffset": 32,
+          "count": 3,
+          "type": "f32",
+          "components": 2
+        },
+        "uvs": {
+          "file": "buffers/data.bin",
+          "byteOffset": 56,
+          "count": 3,
+          "type": "f32",
+          "components": 2
+        },
+        "indices": {
+          "file": "buffers/data.bin",
+          "byteOffset": 80,
+          "count": 3,
+          "type": "u16",
+          "components": 1
+        }
+      },
+      "blendMode": "normal",
+      "culling": false,
+      "masks": [],
+      "rest": {
+        "opacity": 1.0,
+        "drawOrder": 0.0,
+        "multiplyColor": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "screenColor": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "e": {
+      "type": "drawable",
+      "id": "e",
+      "name": "e",
+      "parent": "m",
+      "children": [],
+      "visible": true,
+      "keyformSets": [],
+      "texture": "tex",
+      "mesh": {
+        "positions": {
+          "file": "buffers/data.bin",
+          "byteOffset": 120,
+          "count": 3,
+          "type": "f32",
+          "components": 2
+        },
+        "uvs": {
+          "file": "buffers/data.bin",
+          "byteOffset": 144,
+          "count": 3,
+          "type": "f32",
+          "components": 2
+        },
+        "indices": {
+          "file": "buffers/data.bin",
+          "byteOffset": 168,
+          "count": 3,
+          "type": "u16",
+          "components": 1
+        }
+      },
+      "blendMode": "normal",
+      "culling": false,
+      "masks": [],
+      "rest": {
+        "opacity": 1.0,
+        "drawOrder": 0.0,
+        "multiplyColor": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "screenColor": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "m": {
+      "type": "meshDeformer",
+      "id": "m",
+      "name": "m",
+      "parent": "root",
+      "children": [
+        "e"
+      ],
+      "visible": true,
+      "keyformSets": [],
+      "mesh": {
+        "positions": {
+          "file": "buffers/data.bin",
+          "byteOffset": 88,
+          "count": 3,
+          "type": "f32",
+          "components": 2
+        },
+        "indices": {
+          "file": "buffers/data.bin",
+          "byteOffset": 112,
+          "count": 3,
+          "type": "u16",
+          "components": 1
+        }
+      },
+      "rest": {
+        "opacity": 1.0
+      }
+    },
+    "r": {
+      "type": "rotation",
+      "id": "r",
+      "name": "r",
+      "parent": "w",
+      "children": [
+        "d"
+      ],
+      "visible": true,
+      "keyformSets": [],
+      "rest": {
+        "origin": [
+          0.5,
+          0.5
+        ],
+        "angle": 0.0,
+        "scale": 1.0,
+        "opacity": 1.0
+      }
+    },
+    "root": {
+      "type": "group",
+      "id": "root",
+      "name": "root",
+      "parent": null,
+      "children": [
+        "w",
+        "m"
+      ],
+      "visible": true,
+      "keyformSets": [],
+      "composite": false,
+      "rest": {
+        "opacity": 1.0
+      }
+    },
+    "w": {
+      "type": "warp",
+      "id": "w",
+      "name": "w",
+      "parent": "root",
+      "children": [
+        "r"
+      ],
+      "visible": true,
+      "keyformSets": [
+        {
+          "axes": [
+            {
+              "param": {
+                "parameter": "p",
+                "component": 0
+              },
+              "keys": [
+                0.0,
+                1.0
+              ],
+              "interpolation": "linear"
+            },
+            {
+              "param": {
+                "parameter": "q",
+                "component": 0
+              },
+              "keys": [
+                -1.0,
+                1.0
+              ],
+              "interpolation": "linear"
+            }
+          ],
+          "keyforms": [
+            {
+              "positions": {
+                "file": "buffers/data.bin",
+                "byteOffset": 224,
+                "count": 4,
+                "type": "f32",
+                "components": 2
+              }
+            },
+            {
+              "positions": {
+                "file": "buffers/data.bin",
+                "byteOffset": 256,
+                "count": 4,
+                "type": "f32",
+                "components": 2
+              }
+            },
+            {
+              "positions": {
+                "file": "buffers/data.bin",
+                "byteOffset": 288,
+                "count": 4,
+                "type": "f32",
+                "components": 2
+              }
+            },
+            {
+              "positions": {
+                "file": "buffers/data.bin",
+                "byteOffset": 320,
+                "count": 4,
+                "type": "f32",
+                "components": 2
+              }
+            }
+          ]
+        }
+      ],
+      "rows": 1,
+      "cols": 1,
+      "rest": {
+        "points": {
+          "file": "buffers/data.bin",
+          "byteOffset": 0,
+          "count": 4,
+          "type": "f32",
+          "components": 2
+        },
+        "opacity": 1.0
+      }
+    }
+  },
+  "physics": [],
+  "physicsEnvironment": {
+    "gravity": [
+      0.0,
+      1.0
+    ],
+    "wind": [
+      0.0,
+      0.0
+    ]
+  },
+  "motions": [],
+  "exportIds": {}
+}
