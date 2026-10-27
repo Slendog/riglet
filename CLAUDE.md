@@ -19,7 +19,7 @@ sidecars).
 - **Approved dependencies:** serde, serde_json, zip, png, uuid, thiserror,
   wgpu, egui/eframe (editor only), clap (CLI only), cargo-fuzz (dev tool).
   Ask before adding anything else that is large.
-- **Spec:** `docs/format/riglet-format-v0.3.ts` (TypeScript notation,
+- **Spec:** `docs/format/riglet-format-v0.4.ts` (TypeScript notation,
   language-neutral; `schemaVersion` "0.3.0", versioning policy in its
   header). Its Evaluation (E*),
   Validation (V*) and Limits sections are normative; cite rule IDs in code
