@@ -7,6 +7,47 @@ normative text; entries here record the reasoning.
 
 ---
 
+## v0.2.1 — clarifications found while implementing M1 (status: PROPOSED)
+
+The M1 implementation already follows these. They don't change the data
+format; they settle cases v0.2 doesn't decide. If accepted, I fold them into
+the spec and bump `schemaVersion` to "0.2.1" (patch: v0.2.0 files stay valid
+and read unchanged).
+
+1. **E6, child deltas under a mesh deformer.** "Keep its barycentric weights"
+   would ignore a child's own keyform deltas. Proposal: binding fixes the
+   *triangle* only. At evaluation, the child's current point maps through the
+   affine map that takes the bound rest triangle onto its deformed triangle.
+   At rest this matches the v0.2 text exactly.
+2. **E6, points that reach a mesh deformer through other deformers.** For
+   example, drawable -> warp -> mesh deformer. Proposal: bind the child's rest
+   points after mapping them up the rest chain to the mesh deformer's space.
+   At rest, mesh deformers are the identity, so this needs no recursion.
+3. **E5, rotation under a mesh deformer.** The rest map of a triangle is the
+   identity, so `J0 = I`: dθ is the rotation of the triangle's affine map,
+   ds = sqrt(|det J|).
+4. **E3, draw order on step axes.** E3 says draw order uses the nearest key
+   "per axis". Proposal: only on linear axes; a step axis keeps the lower
+   key, as for every other property. Otherwise a step axis would switch draw
+   order half-way between keys, which a step axis exists to prevent.
+5. **Visibility.** `visible: false` hides the node and its whole subtree.
+6. **V2, drawables cannot have children.** The node-space comment lists no
+   space for children of a drawable. Proposal: a drawable with children is a
+   validation error (`V2_PARENT_TYPE`) until the Inochi2D "transform on every
+   node" gap is resolved.
+7. **V3, IDs and textures.**
+   - Parameter, texture and motion IDs must be unique.
+   - `exportIds` keys must refer to an existing parameter or node.
+   - A texture file must exist and be a PNG.
+8. **Limits, new cap: keyform vertices total = 33 554 432.** Many keyforms
+   can point at the same bytes, so the decoded size is not bounded by the
+   package size. The existing "vertices total" (4 194 304) is too low to also
+   cover keyforms of real Live2D models. The cap is checked before decoding.
+9. **Migration, patch versions.** Files with the same minor version and any
+   patch version (0.2.x) are readable without migration.
+
+---
+
 ## v0.2.0 — evaluator semantics (status: ACCEPTED with amendments, 2026-10-27)
 
 v0.1 defines the data model but leaves several evaluation rules open. The M1
