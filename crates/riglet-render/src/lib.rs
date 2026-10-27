@@ -20,6 +20,8 @@ pub use crate::image::{Image, TextureData};
 /// Target format for every color target (R1: never an sRGB format).
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+/// Size of the shader's `Draw` uniform.
+const DRAW_UNIFORM_BYTES: u64 = 48;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RenderError {
@@ -189,8 +191,12 @@ impl Renderer {
             max_texture_dimension: limits.max_texture_dimension_2d,
         };
         let pipelines = create_pipelines(&device);
-        let align = u64::from(limits.min_uniform_buffer_offset_alignment).max(48);
-        Ok(Renderer { device, queue, summary, budgets: options.budgets, pipelines, draw_stride: align })
+        // Dynamic uniform offsets must be multiples of the device's
+        // alignment (256 on many GPUs, 32 on llvmpipe): round the 48-byte
+        // Draw struct up to the next multiple.
+        let align = u64::from(limits.min_uniform_buffer_offset_alignment).max(1);
+        let stride = DRAW_UNIFORM_BYTES.div_ceil(align) * align;
+        Ok(Renderer { device, queue, summary, budgets: options.budgets, pipelines, draw_stride: stride })
     }
 
     pub fn adapter(&self) -> &AdapterSummary {
@@ -270,7 +276,7 @@ impl Renderer {
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                         buffer: &uniform_buffer,
                         offset: 0,
-                        size: wgpu::BufferSize::new(48),
+                        size: wgpu::BufferSize::new(DRAW_UNIFORM_BYTES),
                     }),
                 },
             ],
@@ -418,7 +424,7 @@ impl Renderer {
             vec![0u8; ((model.drawable_count + model.composite_count).max(1) as u64 * self.draw_stride) as usize];
         let mut put = |slot: usize, values: [f32; 12]| {
             let at = slot * self.draw_stride as usize;
-            if let Some(dst) = uniforms.get_mut(at..at + 48) {
+            if let Some(dst) = uniforms.get_mut(at..at + DRAW_UNIFORM_BYTES as usize) {
                 for (chunk, v) in dst.as_chunks_mut::<4>().0.iter_mut().zip(values) {
                     *chunk = v.to_le_bytes();
                 }
