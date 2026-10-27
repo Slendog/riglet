@@ -170,6 +170,7 @@ cargo test --release -p riglet-format --test binding -- --ignored   # worst-case
 # Fuzz from the repo root; corpus/ is gitignored, seeds/ is committed.
 cargo +nightly fuzz run package fuzz/corpus/package fuzz/seeds/package -- -timeout=10 -max_len=16384
 cargo +nightly fuzz run model_json fuzz/corpus/model_json fuzz/seeds/model_json -- -timeout=10 -max_len=16384
+cargo +nightly fuzz run texture_png fuzz/corpus/texture_png fuzz/seeds/texture_png -- -timeout=10 -max_len=65536
 cargo test --test malformed -- --ignored write_fuzz_seeds          # regenerate seeds after format changes
 ```
 

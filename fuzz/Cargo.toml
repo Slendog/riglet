@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 riglet-format = { path = "../crates/riglet-format" }
+riglet-render = { path = "../crates/riglet-render" }
 serde_json = "1.0.154"
 
 # Not part of the main workspace: cargo-fuzz needs nightly.
@@ -25,6 +26,13 @@ bench = false
 [[bin]]
 name = "model_json"
 path = "fuzz_targets/model_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "texture_png"
+path = "fuzz_targets/texture_png.rs"
 test = false
 doc = false
 bench = false

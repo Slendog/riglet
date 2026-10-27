@@ -83,3 +83,4 @@ jobs:
       - run: cargo +nightly check --manifest-path fuzz/Cargo.toml
       - run: cargo +nightly fuzz run package fuzz/seeds/package -- -max_total_time=60 -timeout=10 -max_len=16384
       - run: cargo +nightly fuzz run model_json fuzz/seeds/model_json -- -max_total_time=60 -timeout=10 -max_len=16384
+      - run: cargo +nightly fuzz run texture_png fuzz/seeds/texture_png -- -max_total_time=60 -timeout=10 -max_len=65536 -rss_limit_mb=2048
