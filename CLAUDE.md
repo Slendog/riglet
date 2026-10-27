@@ -132,25 +132,41 @@ depends on format + render + converters. Only the editor depends on egui.
   never exact equality. Results differ slightly between x86_64 and arm64.
 - **GPU in tests:** headless render tests must run without a real GPU: CI
   uses Mesa lavapipe (Linux), WARP (Windows), and Metal (macOS).
-- **Golden images:** render tests use a per-channel tolerance (8/255) plus
-  a maximum fraction of differing pixels (0.5%), because GPU backends
-  rasterize slightly differently. Fixtures are Rust code in
+- **Golden images:** render tests compare against goldens with a two-tier
+  tolerance (below). Fixtures are Rust code in
   `crates/riglet-fixtures/src/fixtures.rs` (one per rendering feature);
   goldens live in `crates/riglet-render/tests/goldens/`.
   - **Reference setup:** lavapipe (Mesa's software Vulkan), Linux x86_64,
-    `WGPU_BACKEND=vulkan`. Regenerate with the manual "Update goldens"
-    workflow, review the images, commit them. Locally,
-    `RIGLET_UPDATE_GOLDENS=1 cargo test -p riglet-render --test render goldens`
-    writes goldens from your own GPU: fine for experiments, never commit
-    those.
-  - **Required on Linux:** CI installs lavapipe and sets
-    `RIGLET_REQUIRE_GPU=1`, so a missing adapter fails the job. Elsewhere,
-    render tests print `SKIPPED` without an adapter; every job writes its
-    adapter (or SKIPPED) to the run summary. Never set `WGPU_BACKEND` to an
+    `WGPU_BACKEND=vulkan`.
+  - **Skips must not look like passes.** Every CI runner sets
+    `RIGLET_REQUIRE_GPU=1` and expects a specific backend and adapter
+    (`RIGLET_EXPECT_BACKEND`, `RIGLET_EXPECT_ADAPTER`): Vulkan/llvmpipe
+    (lavapipe) on Linux, DX12/"Microsoft Basic Render Driver" (WARP) on
+    Windows, Metal on macOS (Apple Paravirtual device, both arm64 and
+    Intel). No adapter, another backend or another adapter fails the job,
+    so a silent fallback (e.g. to GL) can't pass. Every job also writes its
+    adapter to the run summary.
+  - **Skip allow-list (runners where render tests may skip): empty.** Add
+    a runner (`allow_skip: true` in `ci.yml`) only after it is shown to
+    have no adapter, with the justification here.
+  - **Tolerance (two tiers, `mod tolerance` in `tests/render.rs`):** every
+    pixel within 8 per channel; at most 0.5% of pixels (minimum 4) beyond
+    2. Measured: texel-aligned fixtures match the reference exactly or
+    within 2 on all six CI adapters. Fixtures avoid magnified filtered
+    textures (those differed by up to 24 between adapters); bilinear
+    filtering is covered by `uv_orientation`.
+  - **Exact math is tested exactly:** the premultiply and un-premultiply
+    integer formulas are checked against an oracle for all 256 x 256
+    pairs (`image.rs` unit tests), never only through a toleranced golden.
+  - **Updating goldens is explicit:** `scripts/update-goldens.sh` (renders
+    on lavapipe in CI via a temporary branch and downloads the result);
+    `--local` renders with your own GPU for experiments, never commit
+    those. Nothing updates goldens automatically.
+  - On a mismatch, expected/actual/diff images go to
+    `target/tmp/render-failures/` and CI uploads them as the
+    `render-failures-<os>` artifact. Never set `WGPU_BACKEND` to an
     empty string: wgpu reads that as "no backends" and every render test
     silently skips.
-  - Mismatching images are uploaded as the `render-failures-<os>`
-    artifact.
 - **Editor:** native file dialogs and clipboard via cross-platform crates
   (ask before adding them in M4). Linux builds need X11 and Wayland support.
 

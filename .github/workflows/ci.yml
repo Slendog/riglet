@@ -18,22 +18,25 @@ jobs:
       matrix:
         # x86_64 and arm64 on every platform. Linux is pinned to 24.04
         # (ubuntu-latest is moving to 26.04) so Mesa stays fixed for the
-        # M2 render tests. macos-15-intel is GitHub's last Intel image,
+        # render tests. macos-15-intel is GitHub's last Intel image,
         # announced as available until about August 2027.
-        os:
-          - ubuntu-24.04
-          - ubuntu-24.04-arm
-          - macos-latest
-          - macos-15-intel
-          - windows-latest
-          - windows-11-arm
+        #
+        # backend/adapter: what the render tests MUST run on; anything else
+        # (including a silent fallback to GL) fails. allow_skip: render
+        # tests may skip for lack of an adapter. The allow-list is EMPTY;
+        # an entry needs a justification in CLAUDE.md.
+        include:
+          - { os: ubuntu-24.04, backend: Vulkan, adapter: llvmpipe, allow_skip: false }
+          - { os: ubuntu-24.04-arm, backend: Vulkan, adapter: llvmpipe, allow_skip: false }
+          - { os: macos-latest, backend: Metal, adapter: "", allow_skip: false }
+          - { os: macos-15-intel, backend: Metal, adapter: "", allow_skip: false }
+          - { os: windows-latest, backend: Dx12, adapter: Microsoft Basic Render Driver, allow_skip: false }
+          - { os: windows-11-arm, backend: Dx12, adapter: Microsoft Basic Render Driver, allow_skip: false }
     runs-on: ${{ matrix.os }}
     env:
-      # Linux renders on lavapipe, the golden reference, and render tests
-      # are REQUIRED there: a missing adapter fails the job, so skipping can
-      # never silently hide every render test. Elsewhere render tests use
-      # whatever adapter exists (Metal, WARP) or report SKIPPED.
-      RIGLET_REQUIRE_GPU: ${{ startsWith(matrix.os, 'ubuntu') && '1' || '0' }}
+      RIGLET_REQUIRE_GPU: ${{ matrix.allow_skip && '0' || '1' }}
+      RIGLET_EXPECT_BACKEND: ${{ matrix.backend }}
+      RIGLET_EXPECT_ADAPTER: ${{ matrix.adapter }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # rustup is preinstalled on every hosted runner; with no arguments it
@@ -60,10 +63,10 @@ jobs:
         if: always()
         shell: bash
         run: |
-          line=$(grep -m1 -E '^render tests: (adapter|SKIPPED)' tests.log 2>/dev/null || echo 'render tests: did not run')
+          line=$(grep -v 'cli render tests' tests.log 2>/dev/null | grep -m1 -E 'render tests: (adapter|SKIPPED)' || echo 'render tests: did not run')
           cli=$(grep -c 'cli render tests: SKIPPED' tests.log 2>/dev/null || true)
-          echo "${{ matrix.os }}: $line (CLI render tests skipped: ${cli:-0})"
-          echo "- **${{ matrix.os }}**: ${line#render tests: } (CLI render tests skipped: ${cli:-0})" >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ matrix.os }}: ${line#*render tests: } (expected ${{ matrix.backend }} ${{ matrix.adapter }}; CLI render tests skipped: ${cli:-0})"
+          echo "- **${{ matrix.os }}**: ${line#*render tests: } (expected ${{ matrix.backend }} ${{ matrix.adapter }}; CLI render tests skipped: ${cli:-0})" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload golden mismatches
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -1,6 +1,6 @@
-# Regenerates the golden images on the reference setup: lavapipe on Linux
-# x86_64 (see CLAUDE.md). Run it by hand after an intended rendering change,
-# download the artifact, review the images, and commit them.
+# Renders the golden images on the reference setup: lavapipe on Linux
+# x86_64 (see CLAUDE.md). Started only by scripts/update-goldens.sh (or by
+# hand); it uploads the images as an artifact and never commits anything.
 name: Update goldens
 
 on:
