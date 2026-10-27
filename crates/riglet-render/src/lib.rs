@@ -141,31 +141,52 @@ pub struct Renderer {
 }
 
 fn blend_index(mode: BlendMode) -> usize {
-    match mode {
-        BlendMode::Normal => 0,
-        BlendMode::Additive => 1,
-        BlendMode::Multiply => 2,
-    }
+    BlendMode::ALL.iter().position(|&m| m == mode).unwrap_or(0)
 }
 
-/// R4, premultiplied.
+/// R4, premultiplied. Group (a) uses the blend functions of Inochi2D's
+/// legacy GL path (`core/nodes/common.d`, `inSetBlendModeLegacy`); a GL
+/// factor applied to both color and alpha reads the alpha of a color
+/// factor here (`Src` alpha = As, `Dst` alpha = Ad).
 fn blend_state(mode: BlendMode) -> wgpu::BlendState {
     use wgpu::{BlendComponent as C, BlendFactor as F, BlendOperation as O};
-    let keep_alpha = C { src_factor: F::Zero, dst_factor: F::One, operation: O::Add };
+    let add = |src_factor, dst_factor| C { src_factor, dst_factor, operation: O::Add };
+    let both = |c: C| wgpu::BlendState { color: c, alpha: c };
+    let keep_alpha = add(F::Zero, F::One);
+    let over_alpha = add(F::One, F::OneMinusSrcAlpha);
     match mode {
         BlendMode::Normal => wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-        BlendMode::Additive => wgpu::BlendState {
-            color: C { src_factor: F::One, dst_factor: F::One, operation: O::Add },
-            alpha: keep_alpha,
+        BlendMode::Additive => wgpu::BlendState { color: add(F::One, F::One), alpha: keep_alpha },
+        BlendMode::Multiply => wgpu::BlendState { color: add(F::Dst, F::OneMinusSrcAlpha), alpha: keep_alpha },
+        // ONE, ONE_MINUS_SRC_COLOR (also Inochi2D's LinearDodge).
+        BlendMode::Screen => wgpu::BlendState { color: add(F::One, F::OneMinusSrc), alpha: over_alpha },
+        // GL_MAX ignores the factors; wgpu requires them to be One.
+        BlendMode::Lighten => both(C { src_factor: F::One, dst_factor: F::One, operation: O::Max }),
+        // DST_COLOR, ONE.
+        BlendMode::ColorDodge => both(add(F::Dst, F::One)),
+        // Color ONE, ONE; alpha ONE, ONE_MINUS_SRC_ALPHA.
+        BlendMode::AddGlow => wgpu::BlendState { color: add(F::One, F::One), alpha: over_alpha },
+        // Color REVERSE_SUBTRACT with ONE_MINUS_DST_COLOR, ONE; alpha ADD.
+        BlendMode::Subtract => wgpu::BlendState {
+            color: C { src_factor: F::OneMinusDst, dst_factor: F::One, operation: O::ReverseSubtract },
+            alpha: add(F::OneMinusDst, F::One),
         },
-        BlendMode::Multiply => wgpu::BlendState {
-            color: C { src_factor: F::Dst, dst_factor: F::OneMinusSrcAlpha, operation: O::Add },
-            alpha: keep_alpha,
-        },
+        // Color ONE_MINUS_DST_COLOR, ONE_MINUS_SRC_COLOR; alpha ONE, ONE.
+        BlendMode::Exclusion => {
+            wgpu::BlendState { color: add(F::OneMinusDst, F::OneMinusSrc), alpha: add(F::One, F::One) }
+        }
+        // ONE_MINUS_DST_COLOR, ONE_MINUS_SRC_ALPHA.
+        BlendMode::Inverse => both(add(F::OneMinusDst, F::OneMinusSrcAlpha)),
+        // ZERO, SRC_ALPHA.
+        BlendMode::DestinationIn => both(add(F::Zero, F::SrcAlpha)),
+        // DST_ALPHA, ONE_MINUS_SRC_ALPHA.
+        BlendMode::ClipToLower => both(add(F::DstAlpha, F::OneMinusSrcAlpha)),
+        // ZERO, ONE_MINUS_SRC_ALPHA.
+        BlendMode::SliceFromLower => both(add(F::Zero, F::OneMinusSrcAlpha)),
     }
 }
 
-const BLENDS: [BlendMode; 3] = [BlendMode::Normal, BlendMode::Additive, BlendMode::Multiply];
+const BLENDS: [BlendMode; 13] = BlendMode::ALL;
 
 impl Renderer {
     /// Opens a GPU device. Fails with [`RenderError::NoAdapter`] when the

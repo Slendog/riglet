@@ -49,6 +49,17 @@ pub fn all() -> Vec<Fixture> {
         blend("blend_normal", BlendMode::Normal),
         blend("blend_additive", BlendMode::Additive),
         blend("blend_multiply", BlendMode::Multiply),
+        // R4 group (a): Inochi2D's fixed-function modes.
+        blend("blend_screen", BlendMode::Screen),
+        blend("blend_lighten", BlendMode::Lighten),
+        blend("blend_color_dodge", BlendMode::ColorDodge),
+        blend("blend_add_glow", BlendMode::AddGlow),
+        blend("blend_subtract", BlendMode::Subtract),
+        blend("blend_exclusion", BlendMode::Exclusion),
+        blend("blend_inverse", BlendMode::Inverse),
+        blend("blend_destination_in", BlendMode::DestinationIn),
+        blend("blend_clip_to_lower", BlendMode::ClipToLower),
+        blend("blend_slice_from_lower", BlendMode::SliceFromLower),
     ];
 
     // R4: additive partly over an opaque square, partly over transparency.

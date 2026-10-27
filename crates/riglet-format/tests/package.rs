@@ -207,3 +207,28 @@ fn reads_v0_2_composites_with_migrated_draw_order() {
     assert_eq!(c.rest.draw_order, Some(4.0));
     assert!(riglet_format::Rig::prepare(&back, &Limits::default()).is_ok());
 }
+
+#[test]
+fn blend_mode_names_round_trip() {
+    use riglet_format::model::BlendMode;
+    let names = [
+        "normal",
+        "additive",
+        "multiply",
+        "screen",
+        "lighten",
+        "colorDodge",
+        "addGlow",
+        "subtract",
+        "exclusion",
+        "inverse",
+        "destinationIn",
+        "clipToLower",
+        "sliceFromLower",
+    ];
+    for (mode, name) in BlendMode::ALL.iter().zip(names) {
+        let json = serde_json::to_string(mode).unwrap();
+        assert_eq!(json, format!("\"{name}\""));
+        assert_eq!(serde_json::from_str::<BlendMode>(&json).unwrap(), *mode);
+    }
+}

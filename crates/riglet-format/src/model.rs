@@ -280,12 +280,42 @@ pub struct OpacityRest {
     pub opacity: f32,
 }
 
+/// R4. Group (a) modes (screen .. sliceFromLower) are Inochi2D's
+/// fixed-function ones (its legacy GL path).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "camelCase")]
 pub enum BlendMode {
     Normal,
     Additive,
     Multiply,
+    Screen,
+    Lighten,
+    ColorDodge,
+    AddGlow,
+    Subtract,
+    Exclusion,
+    Inverse,
+    DestinationIn,
+    ClipToLower,
+    SliceFromLower,
+}
+
+impl BlendMode {
+    pub const ALL: [BlendMode; 13] = [
+        BlendMode::Normal,
+        BlendMode::Additive,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Lighten,
+        BlendMode::ColorDodge,
+        BlendMode::AddGlow,
+        BlendMode::Subtract,
+        BlendMode::Exclusion,
+        BlendMode::Inverse,
+        BlendMode::DestinationIn,
+        BlendMode::ClipToLower,
+        BlendMode::SliceFromLower,
+    ];
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

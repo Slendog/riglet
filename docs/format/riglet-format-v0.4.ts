@@ -158,11 +158,18 @@ interface NodeBase {
   extensions?: Extensions;
 }
 
+/** R4. "screen" .. "sliceFromLower" (group (a)) are Inochi2D's
+ *  fixed-function blend modes; Inochi2D's LinearDodge is "screen". */
+export type BlendMode =
+  | "normal" | "additive" | "multiply"
+  | "screen" | "lighten" | "colorDodge" | "addGlow" | "subtract"
+  | "exclusion" | "inverse" | "destinationIn" | "clipToLower" | "sliceFromLower";
+
 export interface GroupNode extends NodeBase {
   type: "group";                   // Live2D Part, Inochi2D Node/Composite
   composite: boolean;              // render the subtree as one layer (R6; Inochi2D Composite)
   // The fields below are only allowed when composite is true (V2).
-  blendMode?: "normal" | "additive" | "multiply";   // default "normal"; for the finished layer
+  blendMode?: BlendMode;           // default "normal"; for the finished layer
   masks?: MaskRef[];               // default []; mask the finished layer (R5)
   rest: {
     opacity: number;
@@ -178,7 +185,7 @@ export interface DrawableNode extends NodeBase {
     uvs: BufferRef;
     indices: BufferRef;            // triangle list
   };
-  blendMode: "normal" | "additive" | "multiply";
+  blendMode: BlendMode;
   culling: boolean;
   masks: MaskRef[];
   // S4: when this drawable is a MASK SOURCE, its coverage is binary: 1
@@ -526,7 +533,20 @@ export interface CurveKey {
  *         normal:    C = Cs + Cd * (1 - As)        A = As + Ad * (1 - As)
  *         additive:  C = Cs + Cd                   A = Ad    (PROVISIONAL)
  *         multiply:  C = Cs * Cd + Cd * (1 - As)   A = Ad    (PROVISIONAL)
- *     - Results saturate at 1.
+ *     Group (a), Inochi2D's fixed-function modes (its legacy GL path,
+ *     core/nodes/common.d), products per channel:
+ *         screen:        C = Cs + Cd * (1 - Cs)          A = As + Ad * (1 - As)
+ *         lighten:       C = max(Cs, Cd)                 A = max(As, Ad)
+ *         colorDodge:    C = Cs * Cd + Cd                A = As * Ad + Ad
+ *         addGlow:       C = Cs + Cd                     A = As + Ad * (1 - As)
+ *         subtract:      C = Cd - Cs * (1 - Cd)          A = As * (1 - Ad) + Ad
+ *         exclusion:     C = Cs * (1 - Cd) + Cd * (1 - Cs)   A = As + Ad
+ *         inverse:       C = Cs * (1 - Cd) + Cd * (1 - As)
+ *                        A = As * (1 - Ad) + Ad * (1 - As)
+ *         destinationIn: C = Cd * As                     A = Ad * As
+ *         clipToLower:   C = Cs * Ad + Cd * (1 - As)     A = Ad
+ *         sliceFromLower: C = Cd * (1 - As)              A = Ad * (1 - As)
+ *     - Results saturate to [0, 1] (subtract can go below 0).
  *     - additive and multiply keep the destination alpha: they recolor what
  *       is there and add no coverage. Consequence: additive over (partly)
  *       transparent pixels can leave C > A, which is not valid
@@ -738,8 +758,10 @@ export interface CurveKey {
  *   - Composite tint (multiply/screen color on the layer).
  *   - Inochi2D blend modes that need destination reads in the shader
  *     (Overlay, Darken, ColorBurn, HardLight, SoftLight, Difference):
- *     imported as normal with a warning. (Fixed-function ones: proposed for
- *     v0.4.x, spec-changes.md.)
+ *     imported as normal with a warning. With KHR_blend_equation_advanced
+ *     Inochi2D also draws Multiply, Lighten, ColorDodge and Exclusion with
+ *     the KHR equations, which differ from R4 (Screen's KHR form equals
+ *     R4's on premultiplied data), so its output depends on the GPU.
  *   - Inochi2D screens premultiplied color with an extra alpha factor
  *     (`t + S*a - t*S*a`); converted exactly only for opaque texels.
  *   - Inochi2D allows children under Parts, which V2 rejects. The importer
