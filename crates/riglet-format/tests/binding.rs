@@ -4,11 +4,22 @@
 
 mod common;
 
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use common::*;
 use riglet_format::bind::{TriangleGrid, bind_point_brute};
 use riglet_format::{Limits, Rig, validate};
+
+/// Timing assertions measure wall-clock time, so the heavy tests in this
+/// binary take this lock and run one at a time instead of competing for
+/// the CPU (CI runners have 3-4 cores; in parallel, the adversarial
+/// rejection took 5.2 s on macos-15-intel instead of about 1 s).
+static HEAVY: Mutex<()> = Mutex::new(());
+
+fn heavy() -> std::sync::MutexGuard<'static, ()> {
+    HEAVY.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 struct Rng(u64);
 
@@ -38,6 +49,7 @@ fn check_equivalent(points: &[[f32; 2]], indices: &[u32], queries: &[[f32; 2]]) 
 
 #[test]
 fn grid_matches_reference_on_random_soups() {
+    let _serial = heavy();
     let mut rng = Rng(0x1234_5678_9ABC_DEF1);
     for case in 0..40 {
         let tris = 1 + (rng.next() % 300) as usize;
@@ -59,6 +71,7 @@ fn grid_matches_reference_on_random_soups() {
 
 #[test]
 fn grid_matches_reference_on_a_regular_mesh() {
+    let _serial = heavy();
     // 40 x 40 quads, two triangles each, with shared edges everywhere.
     let n = 40;
     let mut points = Vec::new();
@@ -134,6 +147,7 @@ fn needle_rig(needles: usize, points: usize) -> Builder {
 
 #[test]
 fn adversarial_binding_is_rejected_quickly() {
+    let _serial = heavy();
     // 21 845 needles (65 535 vertices, the per-mesh limit) and 65 536 child
     // points: the grid cannot help, so the work budget must stop it.
     let b = needle_rig(21_845, 65_536);
@@ -147,6 +161,7 @@ fn adversarial_binding_is_rejected_quickly() {
 
 #[test]
 fn adversarial_binding_below_the_budget_loads() {
+    let _serial = heavy();
     // 2048 x 2048 needles: about 2^23 work, well inside the budget.
     let b = needle_rig(2048, 2048);
     let start = Instant::now();
@@ -161,6 +176,7 @@ fn adversarial_binding_below_the_budget_loads() {
 #[test]
 #[ignore = "release only: cargo test --release --test binding -- --ignored"]
 fn adversarial_binding_rejection_time_in_release() {
+    let _serial = heavy();
     let doc = needle_rig(21_845, 65_536).document();
     let start = Instant::now();
     let issues = validate(&doc, &Limits::default());
@@ -197,6 +213,7 @@ fn regular_rig() -> Builder {
 
 #[test]
 fn large_well_behaved_mesh_loads_with_default_limits() {
+    let _serial = heavy();
     let doc = regular_rig().document();
     let start = Instant::now();
     let rig = Rig::prepare(&doc, &Limits::default());
