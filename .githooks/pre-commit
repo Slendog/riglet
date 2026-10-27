@@ -1,3 +1,18 @@
 #!/usr/bin/env bash
 # Enable once per clone: git config core.hooksPath .githooks
-exec "$(git rev-parse --show-toplevel)/scripts/check.sh" --staged
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+
+# No staged file over 1 MB (generated data, renders, sample models).
+limit=$((1024 * 1024))
+too_big=0
+while IFS= read -r -d '' path; do
+    size=$(git cat-file -s ":$path")
+    if [ "$size" -gt "$limit" ]; then
+        echo "pre-commit: $path is $size bytes (limit 1 MB); don't commit large files" >&2
+        too_big=1
+    fi
+done < <(git diff --cached --name-only --diff-filter=AM -z)
+[ "$too_big" -eq 0 ] || exit 1
+
+exec "$root/scripts/check.sh" --staged

@@ -282,6 +282,11 @@ is committed. Enable the hook once per clone:
 git config core.hooksPath .githooks
 ```
 
+- The pre-commit hook also rejects any staged file over 1 MB, and the
+  `commit-msg` hook rejects new files under `fuzz/seeds/` unless the
+  message contains `[seeds]` (`cargo fuzz run` writes new inputs into its
+  first directory argument; locally always pass `fuzz/corpus/<target>`
+  first, it is gitignored).
 - Never pipe a check command without `set -o pipefail` (or don't pipe it):
   a pipe hides the command's exit status. The script uses
   `set -euo pipefail`.

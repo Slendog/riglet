@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Runs after pre-commit, once the message exists (pre-commit can't see it).
+# New files under fuzz/seeds/ need "[seeds]" in the commit message, so
+# fuzzer output can't be committed as seeds by accident (cargo fuzz writes
+# new inputs into its FIRST directory argument).
+set -euo pipefail
+msg_file="$1"
+new_seeds=$(git diff --cached --name-only --diff-filter=A -- fuzz/seeds/ | head -n 5)
+if [ -n "$new_seeds" ] && ! grep -qF "[seeds]" "$msg_file"; then
+    count=$(git diff --cached --name-only --diff-filter=A -- fuzz/seeds/ | wc -l | tr -d ' ')
+    {
+        echo "commit-msg: this commit adds $count file(s) under fuzz/seeds/, e.g.:"
+        echo "$new_seeds" | sed 's/^/  /'
+        echo "Add \"[seeds]\" to the commit message if they are meant as seeds."
+    } >&2
+    exit 1
+fi
