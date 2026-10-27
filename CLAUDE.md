@@ -115,14 +115,40 @@ depends on format + render + converters. Only the editor depends on egui.
 
 ## Build and test
 
-Requires the stable Rust toolchain (rustup); fuzzing also needs nightly.
-The Cargo workspace is created in M1. Rust is not installed on the
-maintainer's machine yet; the maintainer installs it.
+Requires the stable Rust toolchain (rustup); fuzzing also needs nightly
+and `cargo install cargo-fuzz`. CI (`.github/workflows/ci.yml`) runs fmt,
+clippy and tests on Linux, macOS and Windows (x86_64 and arm64), plus a short
+fuzz run.
 
 ```sh
 cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
-cargo +nightly fuzz run <target>     # from the repo root, see fuzz/
+cargo +nightly fuzz run package      # from the repo root; targets in fuzz/fuzz_targets/
+cargo +nightly fuzz run model_json
 ```
+
+`fuzz/` is its own Cargo workspace (it needs nightly), so `--workspace`
+commands skip it. Check that it still compiles with
+`cargo check --manifest-path fuzz/Cargo.toml`.
+
+## Code conventions
+
+- Lints (workspace `Cargo.toml`): `unsafe_code` is forbidden; `unwrap`,
+  `expect` and slice indexing warn in library code (CI denies warnings).
+  Use `get()` and return errors instead. Tests may use them
+  (`clippy.toml`, and an `#![allow]` at the top of each integration test).
+- `rustfmt.toml`: max width 120.
+- Cite spec rule IDs (E*, V*) in comments next to the code that implements
+  them. Validation issue codes (`V5_KEYS`, `LIMIT_NODES`, ...) are stable:
+  never rename one, only add new ones.
+- `riglet-format` layout: `model` (serde types, on-disk shape only),
+  `package` (ZIP I/O + limits), `migrate`, `buffer`, `rig` (validation ->
+  prepared `Rig` with indices instead of IDs), `eval` (evaluator),
+  `geometry` (warp/rotation/triangle math).
+- Tests: unit tests next to the code; integration tests in
+  `crates/riglet-format/tests/` build synthetic models with
+  `tests/common/mod.rs` (`Builder`). Malformed-input smoke tests
+  (`tests/malformed.rs`) run on stable; every new importer adds both a smoke
+  test and a fuzz target.
