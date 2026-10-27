@@ -1,17 +1,52 @@
 # Spec change proposals
 
 Each entry is a proposed change to the Riglet project format spec
-(`docs/format/rigproj-format-v0.1.ts`). Accepted entries are folded into the
-next spec version and `schemaVersion` is bumped.
+(currently `docs/format/riglet-format-v0.2.ts`). Accepted entries are folded
+into the next spec version and `schemaVersion` is bumped. The spec file is the
+normative text; entries here record the reasoning.
 
 ---
 
-## v0.2.0 — evaluator semantics (status: PROPOSED, awaiting review)
+## v0.2.0 — evaluator semantics (status: ACCEPTED with amendments, 2026-10-27)
 
 v0.1 defines the data model but leaves several evaluation rules open. The M1
 evaluator cannot be written without them. No v0.1 files exist in the wild yet,
-so no data migration is needed; the 0.1 -> 0.2 migration hook only rewrites
-`schemaVersion`.
+so the 0.1 -> 0.2 migration only rewrites `format: "rigproj"` to `"riglet"`
+and `schemaVersion` to `"0.2.0"`.
+
+Also in v0.2: the package extension is renamed `.rigproj` -> `.riglet`, and the
+manifest `format` value `"rigproj"` -> `"riglet"`.
+
+### Amendments from review
+
+These override the original proposal text below where they differ.
+
+- **2. Rotation frame under a warp:** analytic Jacobian of the bilinear warp
+  (no finite differences, no epsilon dependence). Rotation from the polar
+  decomposition, relative to the rest Jacobian; scale is
+  `sqrt(|det J| / |det J0|)` so one unit is one pixel at rest. PROVISIONAL:
+  verify against Live2D sample renders by black-box comparison only. (Spec E5.)
+- **3. Warp extrapolation:** outside [0,1]^2 the nearest edge cell's bilinear
+  map is extended linearly; corner regions extrapolate along both axes.
+  M4 editor note: inverse warp via Newton iteration with a bounded iteration
+  count and a fallback. (Spec E7.)
+- **4. Mesh deformer:** lowest triangle index wins ties, both for shared
+  edges/vertices and for "nearest triangle". Zero-area rest triangles are a
+  validation error. (Spec E6, V7.)
+- **5. Parameters:** interpolation never wraps across the ends of a repeat
+  parameter's key range; only the value wraps. A 1d parameter only accepts
+  component 0, enforced by validation. (Spec E2, V4.)
+- **6. Combining:** clamp ranges listed per property (scale >= 1e-6). Draw
+  order uses nearest key (ties to the lower key), not linear interpolation,
+  to avoid flicker when drawables cross; PROVISIONAL until verified against
+  Live2D samples. Tree-order ties mean depth-first pre-order. (Spec E3, E4.)
+- **7. Validation:** added ZIP limits (entry count, total and per-entry
+  uncompressed size, compression ratio; checked on declared sizes and while
+  streaming), hard caps on nodes, vertices, keyform grid size and texture
+  size (checked before allocating), mask cycles. (Spec V1–V9, Limits.)
+- **8. Motions:** added `inverseStep` interpolation (used by Live2D motion3).
+  (Spec E9.)
+- **Deferred gaps:** moved into the spec as a tracked "Known gaps" section.
 
 ### 1. Angle units and sign
 
@@ -150,14 +185,6 @@ configuration, not part of the spec.
 
 ---
 
-## Deferred (to propose during M3 / M5 / M6)
+## Deferred
 
-- Inochi2D sparse bindings (per-point "is set"): add an optional `defined`
-  mask on KeyformSet, or fill on import and keep the mask in `extensions`.
-- Inochi2D: transform on every node (Parts too), relative/cumulative `zSort`,
-  multiple textures per Part (albedo/emissive/bump), Composite blend mode and
-  tint, cubic interpolation.
-- Live2D: rotation deformer reflect X/Y, warp quad vs triangle cell
-  interpolation, expressions (exp3 Add/Multiply/Overwrite) as a separate type,
-  motion fade-in/out and user-data events, inverse-stepped segments,
-  display info (cdi3.json), Cubism 5 blend shapes.
+Tracked in the spec's "Known gaps" section.

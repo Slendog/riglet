@@ -1,10 +1,14 @@
 /**
- * Rig Project Format — draft v0.1
+ * Riglet Project Format — v0.2
  *
  * Notation: TypeScript types used as a language-neutral spec.
  * The real implementation can be in any language.
+ * Normative rules that types cannot express are in the "Evaluation",
+ * "Validation" and "Limits" sections at the end of this file.
+ * Rules marked PROVISIONAL may change after verification; a change bumps
+ * schemaVersion like any other spec change.
  *
- * On disk: a ZIP package (.rigproj, placeholder name) laid out like:
+ * On disk: a ZIP package (.riglet) laid out like:
  *   manifest.json   Manifest
  *   model.json      Model (everything below)
  *   buffers/*.bin   Little-endian binary arrays referenced by BufferRef
@@ -14,6 +18,10 @@
  *
  * Big arrays (vertices, keyform deltas) live in .bin buffers (glTF-style)
  * so model.json stays small, diffable and fast to parse.
+ *
+ * Paths inside the package are always relative and "/"-separated.
+ *
+ * Changes from v0.1: see docs/format/spec-changes.md (v0.2.0).
  */
 
 export type Id = string;           // stable UUID, never shown to the user
@@ -23,8 +31,8 @@ export type RGB = [number, number, number];
 // ---------- Package-level ----------
 
 export interface Manifest {
-  format: "rigproj";
-  schemaVersion: string;           // semver; readers migrate older versions
+  format: "riglet";                // v0.1 files said "rigproj"; migrated on read
+  schemaVersion: string;           // semver, "0.2.0"; readers migrate older versions
   generator: string;               // app name + version that wrote the file
   provenance: Provenance[];        // import history of this model
 }
@@ -37,14 +45,14 @@ export interface Provenance {
 }
 
 export interface ConversionWarning {
-  code: string;                    // e.g. "KEYFORM_INTERACTION_DROPPED"
+  code: string;                    // stable, e.g. "KEYFORM_INTERACTION_DROPPED"
   objectId?: Id;
   message: string;
 }
 
 export interface BufferRef {
-  file: string;                    // path inside the package
-  byteOffset: number;
+  file: string;                    // path inside the package, under buffers/
+  byteOffset: number;              // aligned to the element size (2 or 4)
   count: number;                   // number of elements
   type: "f32" | "u16" | "u32";
   components: 1 | 2;               // 2 = array of Vec2
@@ -97,12 +105,13 @@ export interface Parameter {
   min: number[];                   // length 1 or 2, matching kind
   max: number[];
   default: number[];
-  repeat?: boolean;                // value wraps around
+  repeat?: boolean;                // value wraps around (see E2)
   group?: string;                  // UI folder only
   extensions?: Extensions;
 }
 
-/** One axis of one parameter. A 2d parameter exposes components 0 and 1.
+/** One axis of one parameter. A 1d parameter exposes component 0 only;
+ *  a 2d parameter exposes components 0 and 1.
  *  Live2D export: each 2d parameter becomes two 1d parameters. */
 export interface ParamAxis { parameter: Id; component: 0 | 1; }
 
@@ -116,15 +125,16 @@ export type Node =
   | MeshDeformerNode;
 
 /** Child positions are stored in the parent's local space:
- *   group/root     -> model space
+ *   group/root     -> the group's parent space (model space at the root)
  *   warp           -> normalized [0,1]^2 of the warp's rest grid
- *   rotation       -> the rotation deformer's local frame
- *   meshDeformer   -> model space, bound to the deformer's triangles */
+ *   rotation       -> the rotation deformer's local frame (see E5)
+ *   meshDeformer   -> the same space as the mesh deformer's own positions
+ *                     (its parent space), bound to its triangles (see E6) */
 interface NodeBase {
   id: Id;
   name: string;
   parent: Id | null;
-  children: Id[];                  // UI order only; draw order is separate
+  children: Id[];                  // UI order and tie-break order; must agree with parent
   visible: boolean;
   keyformSets: KeyformSet[];
   extensions?: Extensions;
@@ -161,17 +171,22 @@ export interface WarpDeformerNode extends NodeBase {
   type: "warp";                    // Live2D warp deformer
   rows: number;                    // cells; control points = (rows+1)*(cols+1)
   cols: number;
-  rest: { points: BufferRef; opacity: number };
+  rest: { points: BufferRef; opacity: number };   // parent space, row-major, x fastest
 }
 
 export interface RotationDeformerNode extends NodeBase {
   type: "rotation";                // Live2D rotation deformer, Inochi2D transform
-  rest: { origin: Vec2; angle: number; scale: number; opacity: number };
+  rest: {
+    origin: Vec2;                  // parent space
+    angle: number;                 // degrees, positive = clockwise on screen
+    scale: number;
+    opacity: number;
+  };
 }
 
 export interface MeshDeformerNode extends NodeBase {
   type: "meshDeformer";            // Inochi2D MeshGroup
-  mesh: { positions: BufferRef; indices: BufferRef };
+  mesh: { positions: BufferRef; indices: BufferRef };   // parent space
   rest: { opacity: number };
   // Live2D export: approximated by fitting a warp deformer (emits a warning)
 }
@@ -182,8 +197,8 @@ export interface MeshDeformerNode extends NodeBase {
  * A KeyformSet is an N-dimensional grid over parameter axes.
  * Each grid point stores DELTAS from the node's rest values.
  *
- * Evaluation: multilinear interpolation inside a set;
- *             multiple sets on the same node are ADDED together.
+ * Evaluation: multilinear interpolation inside a set (draw order excepted,
+ *             see E3); multiple sets on the same node are ADDED together.
  *
  * Live2D import:   one set per object, axes = the parameters it's bound to.
  *                  rest = the keyform at default parameter values.
@@ -197,26 +212,27 @@ export interface MeshDeformerNode extends NodeBase {
  *                  -> KEYFORM_INTERACTION_DROPPED warning.
  */
 export interface KeyformSet {
-  axes: KeyAxis[];
+  axes: KeyAxis[];                 // at least one; no ParamAxis twice
   keyforms: Keyform[];             // row-major over axes, axis 0 varies fastest
 }
 
 export interface KeyAxis {
   param: ParamAxis;
-  keys: number[];                  // strictly ascending parameter values
+  keys: number[];                  // strictly ascending, finite parameter values
   interpolation: "linear" | "step";
 }
 
-/** Only the properties present are animated; missing = zero delta. */
+/** Only the properties present are animated; missing = zero delta.
+ *  A property must be valid for the node type it belongs to. */
 export interface Keyform {
   positions?: BufferRef;           // drawable vertices / warp / mesh-deformer points
   opacity?: number;
-  drawOrder?: number;
-  angle?: number;                  // rotation deformers
-  origin?: Vec2;
-  scale?: number;
-  multiplyColor?: RGB;
-  screenColor?: RGB;
+  drawOrder?: number;              // drawables
+  angle?: number;                  // rotation deformers, degrees
+  origin?: Vec2;                   // rotation deformers
+  scale?: number;                  // rotation deformers
+  multiplyColor?: RGB;             // drawables
+  screenColor?: RGB;               // drawables
 }
 
 // ---------- Physics ----------
@@ -262,13 +278,214 @@ export interface Motion {
   loop: boolean;
   tracks: {
     target: { param: ParamAxis } | { node: Id; property: "opacity" };
-    keys: CurveKey[];
+    keys: CurveKey[];              // strictly ascending t (see E9)
   }[];
 }
 
 export interface CurveKey {
   t: number;                       // seconds
   value: number;
-  interp: "linear" | "step" | "bezier";
-  handles?: [Vec2, Vec2];          // bezier in/out handles, relative
+  interp: "linear" | "step" | "inverseStep" | "bezier";   // segment to the next key
+  handles?: [Vec2, Vec2];          // bezier only, see E9
 }
+
+/* =====================================================================
+ * EVALUATION (normative)
+ * =====================================================================
+ *
+ * E1. Order. Nodes are evaluated top-down: a node's evaluated state in its
+ *     own parent space is computed first, then mapped through each ancestor
+ *     deformer up to model space.
+ *
+ * E2. Parameter values.
+ *     - A value is clamped to [min, max]. For a `repeat` parameter it is
+ *       instead wrapped into [min, max).
+ *     - Only the value wraps. Interpolation never wraps across the ends of
+ *       a key range. For a seamless loop, put keys at min and max with
+ *       equal keyforms.
+ *
+ * E3. Inside one KeyformSet.
+ *     - Per axis, values below keys[0] / above keys[last] clamp to the end
+ *       key (no extrapolation). An axis with one key is constant.
+ *     - linear: in the interval [k_i, k_i+1] containing v,
+ *       t = (v - k_i) / (k_i+1 - k_i).
+ *     - step: the greatest key <= v (the lower key), t = 0.
+ *     - All properties except drawOrder: multilinear blend of the 2^N
+ *       corner keyforms with the per-axis weights.
+ *     - drawOrder (PROVISIONAL, to verify against Live2D samples): never
+ *       interpolated. Per axis, take the nearest key (ties go to the lower
+ *       key) and use that grid point's delta. This avoids flicker when two
+ *       drawables cross.
+ *
+ * E4. Combining.
+ *     - value = rest + sum over the node's sets of the set's delta, then
+ *       clamped:
+ *         opacity, multiplyColor, screenColor (each channel)   [0, 1]
+ *         scale                                                 >= 1e-6
+ *         angle, origin, positions, drawOrder                   unclamped
+ *     - Effective opacity = own opacity × parent's effective opacity, for
+ *       every node type (groups and deformers included).
+ *     - multiplyColor / screenColor apply per drawable; no inheritance.
+ *     - Draw order: drawables sorted ascending by evaluated drawOrder
+ *       (higher on top). Ties break by depth-first pre-order position in
+ *       the node tree (following `children` order).
+ *
+ * E5. Rotation deformer. Local unit = 1 model pixel at rest.
+ *     Let R(a) = [[cos a, -sin a], [sin a, cos a]] (a in degrees, converted).
+ *     - Parent is a group/root:  p' = origin + scale * R(angle) * p.
+ *     - Parent is a rotation deformer: same formula, then the parent's map.
+ *     - Parent is a warp (PROVISIONAL, to verify against Live2D sample
+ *       renders by black-box comparison only):
+ *         J  = analytic Jacobian (E7) of the warp's current map at origin
+ *         J0 = analytic Jacobian of the warp's rest map at origin
+ *         rot(M) = atan2(M10 - M01, M00 + M11)
+ *                  (the rotation part of M's polar decomposition; it is the
+ *                  rotation closest to M, so shear is removed)
+ *         dθ = rot(J) - rot(J0), converted to degrees
+ *         ds = sqrt(|det J| / |det J0|)
+ *         p' = W(origin) + ds * scale * R(angle + dθ) * p
+ *       If |det J0| < 1e-12 or both atan2 arguments of rot(J) are 0, use
+ *       dθ = 0 and ds = 1.
+ *     - Parent is a mesh deformer: as for a warp, with J and J0 the affine
+ *       Jacobians of the triangle bound to origin (E6).
+ *
+ * E6. Mesh deformer binding. Derived at load, never stored.
+ *     - For each child point, find the rest triangle containing it and keep
+ *       its barycentric weights. Deformed point = the same weights applied
+ *       to the deformed triangle.
+ *     - A point on a shared edge or vertex goes to the lowest triangle index.
+ *     - A point outside every triangle uses the nearest triangle (Euclidean
+ *       distance to the triangle) with unclamped barycentrics (affine
+ *       extrapolation). Ties go to the lowest triangle index.
+ *     - To verify against Inochi2D MeshGroup in M3. If Inochi2D differs, the
+ *       converter emits a warning; this rule does not change silently.
+ *
+ * E7. Warp deformer.
+ *     - Control point index: j * (cols + 1) + i (row j, column i).
+ *     - For a child point (u, v): cell column i = clamp(floor(u * cols), 0,
+ *       cols - 1), cell row j = clamp(floor(v * rows), 0, rows - 1);
+ *       s = u * cols - i, t = v * rows - j. s and t are NOT clamped.
+ *     - W(u, v) = (1-s)(1-t) P00 + s(1-t) P10 + (1-s)t P01 + st P11
+ *       with P00 = P(i, j), P10 = P(i+1, j), P01 = P(i, j+1),
+ *       P11 = P(i+1, j+1).
+ *     - Outside [0,1]^2 the nearest edge cell's bilinear map is extended
+ *       linearly (s or t leaves [0,1]). In corner regions both s and t
+ *       leave [0,1], so the corner cell extrapolates along both axes.
+ *     - Analytic Jacobian, columns dW/du and dW/dv:
+ *         dW/du = cols * ((1-t)(P10 - P00) + t(P11 - P01))
+ *         dW/dv = rows * ((1-s)(P01 - P00) + s(P11 - P10))
+ *
+ * E8. Masks. A drawable with masks is drawn only where (clip) or only
+ *     outside where (invert) the union of its mask sources is drawn.
+ *
+ * E9. Motion curves.
+ *     - interp on key k describes the segment from key k to key k+1. The
+ *       last key's interp is ignored. Before the first key / after the last
+ *       key the value holds the end key's value.
+ *     - linear: straight line.
+ *     - step: value_k for t_k <= t < t_k+1.
+ *     - inverseStep: value_k+1 for t_k < t <= t_k+1 (value_k exactly at t_k).
+ *     - bezier: cubic Bezier from key k to key k+1. handles[0] is the first
+ *       control point relative to key k, handles[1] the second control point
+ *       relative to key k+1, both as [dt seconds, dvalue]. Control point
+ *       times are clamped into [t_k, t_k+1] so the curve stays a function of
+ *       time.
+ *
+ * Non-normative (editor, M4): reparenting needs the inverse warp map.
+ * Use Newton iteration on W with the analytic Jacobian, a bounded iteration
+ * count, and a fallback (best iterate, or a search over cells) when it does
+ * not converge.
+ *
+ * =====================================================================
+ * VALIDATION (normative)
+ * =====================================================================
+ * A reader rejects a file that breaks any rule below with an error. It never
+ * crashes or hangs. Every check that bounds an allocation runs before the
+ * allocation.
+ *
+ * V1. Package
+ *     - ZIP limits (see Limits): entry count, per-entry uncompressed size,
+ *       total uncompressed size, per-entry compression ratio. Check the
+ *       declared sizes AND enforce them while decompressing, because
+ *       declared sizes can lie.
+ *     - Entry paths: relative, "/"-separated, no "..", no absolute path, no
+ *       drive letter, no backslash.
+ *     - No two entries whose names differ only by case.
+ *     - manifest.json and model.json present; format == "riglet" (or a
+ *       migratable older value).
+ * V2. Tree
+ *     - Exactly one node has parent == null; it equals Model.root and is a
+ *       group.
+ *     - parent and children agree for every node. No node is listed twice.
+ *     - No cycles; every node is reachable from root.
+ * V3. References
+ *     - Every Id reference resolves: texture, mask source, ParamAxis
+ *       parameter, physics params, motion targets.
+ *     - MaskRef.source is a drawable and not the masked drawable itself.
+ *     - The mask graph (drawable -> its mask sources) has no cycles.
+ * V4. Parameters
+ *     - min/max/default lengths match kind (1 or 2); min < max; default
+ *       within [min, max].
+ *     - ParamAxis.component is 0 for a 1d parameter, 0 or 1 for a 2d one.
+ * V5. Keyforms
+ *     - axes.length >= 1; no ParamAxis appears twice in one set.
+ *     - Every axis has >= 1 keys, strictly ascending and finite.
+ *     - keyforms.length == product of the axes' key counts.
+ *     - Keyform properties are valid for the node type.
+ *     - A keyform positions buffer has the same element count as the node's
+ *       rest buffer (drawable positions, warp points, mesh-deformer
+ *       positions).
+ * V6. Buffers
+ *     - file under buffers/; byteOffset aligned to the element size (4 for
+ *       f32/u32, 2 for u16); byteOffset + count * components * size <= file
+ *       length.
+ *     - positions, uvs, warp points: f32, components 2.
+ *     - indices: u16 or u32, components 1, count % 3 == 0, every index <
+ *       the vertex count.
+ *     - Drawable uvs.count == positions.count.
+ * V7. Geometry
+ *     - Warp: rows >= 1, cols >= 1, points.count == (rows+1) * (cols+1).
+ *     - Mesh deformer: no zero-area rest triangle (|area| < 1e-9 counts as
+ *       zero).
+ * V8. Numbers: all numbers are finite (no NaN, no Inf).
+ * V9. Motions: keys strictly ascending in t; handles present iff interp is
+ *     bezier.
+ *
+ * =====================================================================
+ * LIMITS (normative defaults)
+ * =====================================================================
+ * Readers enforce these caps. A reader may let the user raise them, but a
+ * file within these defaults must load in every conforming reader.
+ *
+ *   ZIP entries                         10 000
+ *   ZIP total uncompressed size         2 GiB
+ *   ZIP per-entry uncompressed size     512 MiB
+ *   ZIP per-entry compression ratio     1000:1 (entries > 1 MiB only;
+ *                                       zero-heavy delta buffers compress
+ *                                       well, so a lower ratio would
+ *                                       reject real files)
+ *   Nodes                               65 536
+ *   Vertices per mesh / warp            65 536
+ *   Vertices total                      4 194 304
+ *   Keyform grid size per set           65 536 (product of key counts)
+ *   Texture width / height              16 384 (checked from the PNG
+ *                                       header before decoding)
+ *
+ * =====================================================================
+ * KNOWN GAPS (tracked; resolved by future spec versions)
+ * =====================================================================
+ * Inochi2D (M3):
+ *   - Sparse bindings (per-point "is set"): add an optional `defined` mask
+ *     on KeyformSet, or fill on import and keep the mask in extensions.
+ *   - A transform on every node (Parts too); relative, cumulative zSort.
+ *   - Multiple textures per Part (albedo, emissive, bump).
+ *   - Composite blend mode and tint.
+ *   - Cubic interpolation of bindings.
+ * Live2D (M5/M6):
+ *   - Rotation deformer reflect X/Y.
+ *   - Warp quad vs triangle cell interpolation.
+ *   - Expressions (exp3: Add/Multiply/Overwrite) as their own type.
+ *   - Motion fade-in/out and user-data events.
+ *   - Display info (cdi3.json).
+ *   - Cubism 5 blend shapes (likely maps to additive sets).
+ */

@@ -7,8 +7,7 @@ sidecars).
 ## Decisions
 
 - **Name:** Riglet. Crates are `riglet-*`, CLI binary is `riglet`, project
-  file extension is `.riglet` (the spec still says `.rigproj`, a placeholder;
-  rename it in the next spec version).
+  file extension is `.riglet`, manifest `format: "riglet"`.
 - **License:** MIT OR Apache-2.0. If code (not just format knowledge) is ported
   from Inochi2D (BSD-2-Clause), keep its copyright notice next to that code.
 - **Stack:** Rust, wgpu (rendering, also offscreen for the CLI), egui/eframe
@@ -20,8 +19,12 @@ sidecars).
 - **Approved dependencies:** serde, serde_json, zip, png, uuid, thiserror,
   wgpu, egui/eframe (editor only), clap (CLI only), cargo-fuzz (dev tool).
   Ask before adding anything else that is large.
-- **Spec:** `docs/format/rigproj-format-v0.1.ts` (TypeScript notation,
-  language-neutral). Proposed changes live in `docs/format/spec-changes.md`.
+- **Spec:** `docs/format/riglet-format-v0.2.ts` (TypeScript notation,
+  language-neutral; `schemaVersion` "0.2.0"). Its Evaluation (E*),
+  Validation (V*) and Limits sections are normative; cite rule IDs in code
+  comments and tests. Rules marked PROVISIONAL may change after verification.
+  Proposals and reasoning live in `docs/format/spec-changes.md`; open issues
+  in the spec's "Known gaps" section.
 
 ## Repo layout
 
@@ -99,18 +102,22 @@ depends on format + render + converters. Only the editor depends on egui.
   `.gitattributes` forces LF in the repo and marks binaries as binary.
 - **No platform-specific code** outside `cfg` blocks with an implementation
   for every target. Prefer crates that already cover all three platforms.
+- **Float tests:** evaluator tests compare floats with explicit tolerances,
+  never exact equality. Results differ slightly between x86_64 and arm64.
 - **GPU in tests:** headless render tests must run without a real GPU: CI
-  uses Mesa lavapipe (Linux), WARP (Windows), and Metal (macOS). Golden-image
-  comparisons use a per-pixel tolerance, because rasterization differs
-  slightly between backends. Evaluator tests compare vertices with a float
-  epsilon, never exact equality.
+  uses Mesa lavapipe (Linux), WARP (Windows), and Metal (macOS).
+- **Golden images:** render tests use a per-pixel tolerance plus a maximum
+  number of differing pixels, because GPU backends rasterize slightly
+  differently. Goldens live in `tests/fixtures/` and come from our own
+  synthetic models only.
 - **Editor:** native file dialogs and clipboard via cross-platform crates
   (ask before adding them in M4). Linux builds need X11 and Wayland support.
 
 ## Build and test
 
 Requires the stable Rust toolchain (rustup); fuzzing also needs nightly.
-The Cargo workspace is created in M1.
+The Cargo workspace is created in M1. Rust is not installed on the
+maintainer's machine yet; the maintainer installs it.
 
 ```sh
 cargo build --workspace
