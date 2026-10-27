@@ -71,17 +71,19 @@ depends on format + render + converters. Only the editor depends on egui.
      without loss (insert a group, keep transforms), with a round-trip test.
    - Convert non-PNG textures (TGA, BC7, ...) to PNG.
 4. Minimal editor: viewport, node tree, parameter sliders, live preview.
-5. Live2D JSON sidecars (model3, physics3, motion3, exp3, cdi3), implemented
-   from observed files.
-6. .moc3 reverse-engineering toolchain, then read-only importer, then exporter
-   for one older moc3 version.
-7. Physics: evaluate the format's `PhysicsRig` (parameters driven by
+5. Physics: evaluate the format's `PhysicsRig` (parameters driven by
    simulated motion), with one model that covers both Inochi2D
    SimplePhysics nodes and Live2D physics3 pendulum chains, and the
    importers/exporters mapped onto it. Essential for real VTuber use (hair,
    clothes and accessories swing); until then both importers keep physics
-   in `extensions` only (`SIMPLE_PHYSICS_UNSUPPORTED`). Its position in the
-   order is open.
+   in `extensions` only (`SIMPLE_PHYSICS_UNSUPPORTED`).
+   - The simulation runs on a fixed timestep and is deterministic (same
+     inputs and step count give bit-identical outputs on every platform, no
+     wall-clock or frame-rate dependence), so it can be tested exactly.
+6. Live2D JSON sidecars (model3, physics3, motion3, exp3, cdi3), implemented
+   from observed files.
+7. .moc3 reverse-engineering toolchain, then read-only importer, then exporter
+   for one older moc3 version.
 
 ## Rules
 

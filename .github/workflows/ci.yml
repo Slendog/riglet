@@ -2,6 +2,11 @@ name: CI
 
 on:
   push:
+    # goldens/<timestamp>-<sha> branches are temporary snapshots pushed by
+    # scripts/update-goldens.sh for the "Update goldens" workflow; they lack
+    # the new goldens by design, so CI on them would always fail.
+    branches-ignore:
+      - "goldens/**"
   pull_request:
 
 permissions:

@@ -30,6 +30,10 @@
  *     via `extensions` and unknown-entry preservation. While major is 0, a
  *     reader rejects a newer minor than its own.
  *   - major: breaking changes; readers migrate older majors.
+ *   - A published (tagged) spec version is never amended: every change
+ *     after a release goes into a new version. Before the first tagged
+ *     release, an unreleased version may still be amended in place (as
+ *     0.4.0 was, see spec-changes.md).
  *
  * Migration 0.3.x -> 0.4.0: none (only optional fields and values were
  * added). One evaluation change: a rotation scale that evaluates below 0
@@ -774,7 +778,13 @@ export interface CurveKey {
  *     Deterministic CPU-built mipmaps could fix this later.
  *   - No anti-aliasing (R7): the renderer will likely want an optional AA
  *     mode later. Golden images are always rendered without it.
- * Live2D (M5/M6):
+ * Physics (M5):
+ *   - PhysicsRig is stored but not evaluated. Evaluating it needs a
+ *     normative, fixed-timestep, deterministic simulation rule (so results
+ *     are testable exactly) whose model covers both Inochi2D SimplePhysics
+ *     and Live2D physics3 pendulum chains; importers keep physics in
+ *     extensions until then.
+ * Live2D (M6/M7):
  *   - Export must merge or approximate S1 non-uniform scale (Live2D
  *     rotation deformers scale uniformly) and S2 multiply sets (Live2D
  *     keyforms are absolute values per grid point; a product of sets

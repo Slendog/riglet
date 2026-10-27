@@ -432,7 +432,16 @@ One exception: **`reInterpolate`** (`core/param/binding.d`, the fill of
 unset grid points) must reproduce Inochi2D's results exactly, so our version
 will follow its algorithm step by step. I will treat it as a port: the file
 `crates/riglet-inochi2d/src/reinterpolate.rs` keeps Inochi2D's BSD-2-Clause
-copyright notice next to the code. No other file is ported.
+copyright notice next to the code.
+
+Ported files (each keeps the notices of what it ports, in full):
+
+| File | Ports | Licenses |
+|---|---|---|
+| `crates/riglet-inochi2d/src/reinterpolate.rs` | `ParameterBindingImpl.reInterpolate` (`core/param/binding.d`), inmath `cubic` | Inochi2D BSD-2-Clause, inmath MIT |
+| `crates/riglet-inochi2d/tests/reference/mod.rs` (test only) | Inochi2D 0.8.7's vertex pipeline: `Transform.update` (`math/transform.d`), `Parameter.findOffset`/`mapValue` and the binding interpolation (`core/param/`), `MeshGroup.precalculate`/`setGroup`/`filterChildren` (`core/nodes/meshgroup/package.d`), `isPointInTriangle` (`math/triangle.d`); inmath `quat.eulerRotation`/`toMatrix` | Inochi2D BSD-2-Clause, inmath MIT |
+
+No other file is ported.
 
 The format documentation in `inochi2d-docs` is CC-BY 3.0; we don't copy
 text from it.
