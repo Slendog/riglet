@@ -21,6 +21,16 @@ fn heavy() -> std::sync::MutexGuard<'static, ()> {
     HEAVY.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Wall-clock limits scale with `RIGLET_TIMING_SCALE` (default 1). CI sets
+/// it per runner in the matrix, with a justification in CLAUDE.md, for
+/// runners much slower than a current desktop (macos-15-intel: about 5x an
+/// Apple M4 on this test). The work budget itself is deterministic and does
+/// not scale.
+fn limit(seconds: u64) -> Duration {
+    let scale: u64 = std::env::var("RIGLET_TIMING_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1).clamp(1, 10);
+    Duration::from_secs(seconds * scale)
+}
+
 struct Rng(u64);
 
 impl Rng {
@@ -156,7 +166,7 @@ fn adversarial_binding_is_rejected_quickly() {
     let issues = validate(&doc, &Limits::default());
     let elapsed = start.elapsed();
     assert!(issues.iter().any(|i| i.code == "LIMIT_MESH_BINDING"), "{issues:?}");
-    assert!(elapsed < Duration::from_secs(5), "rejection took {elapsed:?}");
+    assert!(elapsed < limit(5), "rejection took {elapsed:?}");
 }
 
 #[test]
@@ -168,7 +178,7 @@ fn adversarial_binding_below_the_budget_loads() {
     let rig = Rig::prepare(&b.document(), &Limits::default()).unwrap();
     let elapsed = start.elapsed();
     assert!(rig.binding_work() < Limits::default().binding_work_budget);
-    assert!(elapsed < Duration::from_secs(5), "binding took {elapsed:?}");
+    assert!(elapsed < limit(5), "binding took {elapsed:?}");
 }
 
 /// Release timing of the full-size rejection:
@@ -183,7 +193,7 @@ fn adversarial_binding_rejection_time_in_release() {
     let elapsed = start.elapsed();
     eprintln!("rejection at the default budget took {elapsed:?}");
     assert!(issues.iter().any(|i| i.code == "LIMIT_MESH_BINDING"));
-    assert!(elapsed < Duration::from_secs(5), "rejection took {elapsed:?}");
+    assert!(elapsed < limit(5), "rejection took {elapsed:?}");
 }
 
 /// A large, well-behaved mesh: 20 000 triangles, 65 536 child points.
@@ -221,7 +231,7 @@ fn large_well_behaved_mesh_loads_with_default_limits() {
     let rig = rig.unwrap_or_else(|issues| panic!("{issues:?}"));
     eprintln!("binding work {} in {elapsed:?}", rig.binding_work());
     assert!(rig.binding_work() < Limits::default().binding_work_budget / 16);
-    assert!(elapsed < Duration::from_secs(10), "binding took {elapsed:?}");
+    assert!(elapsed < limit(10), "binding took {elapsed:?}");
 }
 
 /// Small mesh built with exact arithmetic only (no sin/cos), so the input

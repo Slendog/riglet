@@ -34,7 +34,7 @@ jobs:
           - { label: ubuntu-24.04-gl-webgl2, os: ubuntu-24.04, wgpu_backend: gl, backend: Gl, adapter: llvmpipe, limits: webgl2, allow_skip: false }
           - { label: ubuntu-24.04-arm, os: ubuntu-24.04-arm, wgpu_backend: vulkan, backend: Vulkan, adapter: llvmpipe, limits: adapter, allow_skip: false }
           - { label: macos-latest, os: macos-latest, wgpu_backend: "", backend: Metal, adapter: "", limits: adapter, allow_skip: false }
-          - { label: macos-15-intel, os: macos-15-intel, wgpu_backend: "", backend: Metal, adapter: "", limits: adapter, allow_skip: false }
+          - { label: macos-15-intel, os: macos-15-intel, wgpu_backend: "", backend: Metal, adapter: "", limits: adapter, allow_skip: false, timing_scale: 2 }
           - { label: windows-latest, os: windows-latest, wgpu_backend: "", backend: Dx12, adapter: Microsoft Basic Render Driver, limits: adapter, allow_skip: false }
           - { label: windows-11-arm, os: windows-11-arm, wgpu_backend: "", backend: Dx12, adapter: Microsoft Basic Render Driver, limits: adapter, allow_skip: false }
     runs-on: ${{ matrix.os }}
@@ -43,6 +43,9 @@ jobs:
       RIGLET_EXPECT_BACKEND: ${{ matrix.backend }}
       RIGLET_EXPECT_ADAPTER: ${{ matrix.adapter }}
       RIGLET_DEVICE_LIMITS: ${{ matrix.limits }}
+      # Wall-clock limits in timing tests scale by this (default 1); set per
+      # runner only with a justification in CLAUDE.md.
+      RIGLET_TIMING_SCALE: ${{ matrix.timing_scale || 1 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # rustup is preinstalled on every hosted runner; with no arguments it
