@@ -38,7 +38,8 @@ crates/
   riglet-render/    wgpu renderer: evaluated frame -> pixels (window or offscreen)
   riglet-inochi2d/  .inp/.inx import/export
   riglet-live2d/    model3/physics3/motion3/exp3 JSON, moc3 module
-  riglet-cli/       info / validate / render
+  riglet-cli/       info / validate / render (binary `riglet`)
+  riglet-fixtures/  dev-only: model Builder + one render fixture per feature
   riglet-editor/    eframe app
 fuzz/               one fuzz target per importer
 tools/moc3-re/      Python + Kaitai analysis scripts
@@ -179,6 +180,21 @@ Fuzz crashes become regression tests in
 `fuzz/` is its own Cargo workspace (it needs nightly), so `--workspace`
 commands skip it. Check that it still compiles with
 `cargo check --manifest-path fuzz/Cargo.toml`.
+
+## CLI (`riglet`)
+
+- `riglet info FILE [--json]`, `riglet validate FILE [--json]`,
+  `riglet render FILE -o OUT.png [-p NAME=VALUE]... [--scale S]
+  [--background RRGGBB] [--software]`.
+- **Exit codes (stable):** 0 = OK, 1 = the file is invalid (validation
+  issues, or not a readable package), 2 = error (I/O, no GPU adapter, bad
+  arguments).
+- `-p NAME` matches a parameter id, name, Live2D id or Inochi2D id;
+  `id:`, `name:`, `live2d:`, `inochi2d:` restrict it to one kind.
+  Ambiguous matches are an error listing the candidates; never guess.
+- Arguments are untrusted (the CLI may sit behind a web service): values
+  must be finite, scale positive, output at most 8192 x 8192, `--param` at
+  most 1024 bytes.
 
 ## Commit gate
 
