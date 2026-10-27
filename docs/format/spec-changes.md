@@ -7,6 +7,206 @@ normative text; entries here record the reasoning.
 
 ---
 
+## v0.2.2 — rendering semantics (status: PROPOSED)
+
+v0.2.1 defines evaluated geometry, opacity, colors and draw order, but not
+how pixels are produced. M2 (`riglet render`, golden images) needs that
+fixed. Every rule here is a clarification of existing fields; nothing adds a
+field, so this is a patch version (see the versioning policy). Rules that
+copy behavior I believe Live2D/Inochi2D have, but haven't verified, are
+marked PROVISIONAL; they get checked against sample renders by black-box
+comparison only (clean-room rule).
+
+Notation: premultiplied colors. A source pixel is `(Cs, As)`, the
+destination already in the target is `(Cd, Ad)`, results are `(C, A)`.
+Colors are RGB triples in [0,1]; products are per channel.
+
+### R1. Color space (PROVISIONAL)
+
+- All blending, filtering and interpolation happen on the stored (sRGB
+  encoded, "gamma space") values. Texture texels are used as stored, with
+  no sRGB-to-linear decode; render targets are non-sRGB formats
+  (`Rgba8Unorm`), so nothing converts on write either.
+- The output PNG holds those same values and is tagged sRGB.
+- **Why:** Live2D and Inochi2D output looks like gamma-space blending.
+  Linear-space blending would make every imported model's soft edges and
+  semi-transparent layers look different from its source tool.
+- **Cost:** gamma-space blending is not physically correct (dark fringes on
+  bright-over-bright edges). A future `colorSpace` field could make linear
+  opt-in; that would be a minor version.
+
+### R2. Alpha and textures
+
+- **Premultiplied everywhere:** in textures after load, in every render
+  target, and in every blend formula below.
+- **Loading:** a texture with `premultipliedAlpha: false` is premultiplied
+  once, on the 8-bit values on the CPU, with exact integer rounding:
+  `c' = (c * a + 127) / 255` (integer division). This is deterministic on
+  every platform, unlike doing it in a shader. A texture with
+  `premultipliedAlpha: true` is uploaded as is; a texel with `c > a` is
+  clamped to `a` on load (invalid premultiplied data).
+- **UV convention** (missing from v0.2.1): `uv (0, 0)` is the top-left
+  corner of the image, `+v` points down, `(1, 1)` is the bottom-right
+  corner. Texel centers are at `(i + 0.5) / width`.
+- **Filtering:** bilinear for magnification and minification, address mode
+  clamp-to-edge on both axes, **no mipmaps** in v0.2.2. Mipmap generation
+  differs between GPU drivers and would make golden images unstable; the
+  cost is aliasing when a model is drawn much smaller than its texture.
+  Mipmaps can come later as a renderer quality option (they don't change the
+  format).
+
+### R3. Drawable color (where multiplyColor/screenColor apply)
+
+For one drawable, per fragment, with `t = (Pt, At)` the filtered
+premultiplied texel, `M` = evaluated multiplyColor, `S` = evaluated
+screenColor, `o` = effective opacity (E4, but see R6 inside composites):
+
+```
+P1 = Pt * M                     multiply, on premultiplied color
+P2 = P1 + S * At - P1 * S       screen, premultiplied form of c + S - c*S
+Cs = P2 * o
+As = At * o
+```
+
+- Equivalent to applying multiply then screen to the straight color
+  `c = Pt / At` and premultiplying again, but needs no division, so it is
+  exact at `At = 0`.
+- Defaults `M = (1,1,1)`, `S = (0,0,0)` give `Cs = Pt * o`.
+- Applies to drawables only. Not to mask coverage (R5), not to composite
+  results (R6), not inherited (E4 already says so).
+
+### R4. Blend modes
+
+```
+normal:    C = Cs + Cd * (1 - As)       A = As + Ad * (1 - As)
+additive:  C = Cs + Cd                  A = Ad                 (PROVISIONAL)
+multiply:  C = Cs * Cd + Cd * (1 - As)  A = Ad                 (PROVISIONAL)
+```
+
+- Results saturate at 1 (8-bit unorm targets).
+- **additive / multiply keep destination alpha:** these modes change the
+  color of what is already there and don't add coverage. Drawn over a fully
+  transparent target, they leave it transparent. PROVISIONAL because I
+  haven't verified the alpha channel against Live2D/Inochi2D output; it
+  matters only where these layers extend past opaque art, or inside
+  composites (R6), which then composite with less coverage.
+- **multiply** reduces to `Cd` where the source is transparent (`As = 0`,
+  `Cs = 0`) and to `Cs * Cd` where it is opaque.
+- The target starts as transparent black `(0, 0)`. The CLI can fill a
+  background color after rendering; that is not part of the model.
+
+### R5. Masks
+
+Each drawable with masks gets a per-pixel mask value `m` in [0, 1], and its
+fragment output from R3 is scaled by it: `(Cs, As) * m`, before blending.
+
+- **Coverage of one source** `k(x)`: the source drawable's texture alpha `At`
+  over its deformed geometry, rasterized like the drawable itself (same
+  filtering, same pixel rules). It ignores the source's opacity,
+  multiplyColor, screenColor, blend mode and its own masks.
+  - **Opacity ignored (PROVISIONAL):** riggers fade mask shapes out
+    (opacity 0) so only the clipped art shows, which only works if the fade
+    doesn't also delete the clipped art. Using opacity would also make a
+    mask's effect depend on its parents' opacity.
+  - **Own masks ignored:** no recursion; V3 already forbids cycles, this
+    also keeps chains cheap (each source is rasterized once per frame).
+- **Hidden sources still mask (PROVISIONAL, the question E4 deferred):**
+  `visible: false` on a source or its ancestors stops it from being drawn,
+  not from masking. Hiding a mask shape to see the art under it is the
+  common workflow, and an invisible "mask-only" mesh is a common rig
+  pattern.
+- **Combining several MaskRefs:**
+  ```
+  clip   = 1 - Π over clip sources   (1 - k_i)    union of clip shapes
+  invert = 1 - Π over invert sources (1 - k_j)    union of invert shapes
+  m = (clip if any clip source else 1) * (1 - invert if any invert source else 1)
+  ```
+  So: draw inside the union of the clip shapes AND outside the union of the
+  invert shapes. Order of MaskRefs never matters. A Live2D mesh (one mask
+  list, one inverted flag) maps to all-clip or all-invert; Inochi2D
+  mask/dodge maps per ref.
+- **Soft, not thresholded:** `m` multiplies continuously. Inochi2D's
+  per-drawable mask alpha threshold is not modeled yet (Known gap; the M3
+  importer keeps it in `extensions` and warns).
+- Mask coverage is computed in model space at the output resolution,
+  independent of composites: a mask source outside a composite can mask a
+  drawable inside it, and the other way round.
+
+### R6. Composites
+
+A group with `composite: true` renders as one layer:
+
+1. Its subtree's drawables (including nested composites, see below) are
+   drawn, in their draw order (E4) restricted to the subtree, into a cleared
+   transparent offscreen target of the output's size, using their own blend
+   modes and masks.
+2. Inside the composite, a drawable's opacity `o` is the product of the
+   opacities from the drawable up to, but NOT including, the composite group
+   (E4's effective opacity would apply the group's opacity twice, and
+   overlapping children would show seams, which is what composites exist to
+   avoid).
+3. The offscreen result `(Cc, Ac)` is drawn onto the parent target with the
+   normal blend mode, scaled by the composite group's effective opacity
+   `og`: `(Cs, As) = (Cc, Ac) * og`.
+
+- **Place in the parent's draw order (PROVISIONAL):** a composite sorts as
+  one unit using the LOWEST evaluated drawOrder among its drawables, ties
+  broken by the group's pre-order position. It is drawn where its first
+  child would have been. (Alternative: the highest. Inochi2D gives a
+  composite its own z value, which our model doesn't have; the M3 importer
+  will need a rule either way.)
+- **Nesting:** yes. An inner composite is one unit inside the outer
+  composite's offscreen pass, with rule 2 applying at each level (opacity
+  stops at the nearest composite).
+- **Masks on a composite itself: not in v0.2.2.** Only drawables carry
+  `masks`, so a composite can't be masked as a unit without a new field
+  (a minor version; added to Known gaps). Drawables inside a composite can
+  be masked as usual (R5).
+- **Composite blend mode and tint:** stays a Known gap (needs fields).
+  Composites always draw with `normal`.
+- A hidden composite group (or one with a hidden ancestor) draws nothing.
+  A composite with no visible drawables draws nothing.
+
+### R7. Rasterization and anti-aliasing
+
+- **No anti-aliasing in v0.2.2:** no MSAA, no post-process AA. Golden images
+  stay stable across GPUs, and edges stay as smooth as the textures'
+  alpha already makes them (art meshes are usually cut out with transparent
+  margins, so geometry edges rarely show). MSAA can come later as a renderer
+  option.
+- **Projection:** with output scale `s` (CLI `--scale`, default 1), model
+  `(x, y)` maps to pixel coordinates `(x * s + W/2, y * s + H/2)`, where
+  `W = round(canvas.width * s)` and `H = round(canvas.height * s)`. Pixel
+  `(0, 0)` is the top-left; pixel centers are at `+0.5`; standard GPU
+  top-left fill rule.
+- **Culling (PROVISIONAL):** with `culling: true`, triangles that appear
+  counter-clockwise on screen (+Y down) are discarded; clockwise triangles
+  are front-facing. With `culling: false`, both are drawn.
+
+### R8. Output image
+
+- PNG RGBA8, **straight (non-premultiplied) alpha**, because PNG defines
+  straight alpha: `c = (p * 255 + a / 2) / a` (integer, `c = 0` when
+  `a = 0`), clamped to 255.
+- Size `W x H` from R7.
+
+### R9. Loader resource limits (implementation-defined, like the binding budget)
+
+Riglet's renderer will refuse, with a clear error, not a crash:
+
+- an output image larger than 8192 x 8192 (CLI cap, also because a CLI
+  argument is untrusted input);
+- a model texture larger than the GPU adapter's max texture size (2048 on
+  some GL/WebGL adapters). No silent downscale; an explicit
+  `--downscale-textures` option may come later and would warn;
+- composite nesting deeper than 16 (each level needs an offscreen target of
+  the output's size).
+
+These are renderer budgets, not format rules: the same file may render with
+another reader, a bigger GPU, or a larger cap.
+
+---
+
 ## v0.2.1 — clarifications found while implementing M1 (status: ACCEPTED 1–9 with amendments, 2026-10-27; item 10 REJECTED, replaced)
 
 The M1 implementation already follows these. They don't change the data
