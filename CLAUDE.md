@@ -158,10 +158,17 @@ depends on format + render + converters. Only the editor depends on egui.
   - **Exact math is tested exactly:** the premultiply and un-premultiply
     integer formulas are checked against an oracle for all 256 x 256
     pairs (`image.rs` unit tests), never only through a toleranced golden.
-  - **Updating goldens is explicit:** `scripts/update-goldens.sh` (renders
-    on lavapipe in CI via a temporary branch and downloads the result);
-    `--local` renders with your own GPU for experiments, never commit
-    those. Nothing updates goldens automatically.
+  - **Updating goldens is explicit:** `scripts/update-goldens.sh`, never
+    automatic. It renders the current COMMIT on lavapipe in CI via a
+    temporary branch `goldens/<UTC timestamp>-<sha>` on the public repo
+    (deleted on success, failure or interrupt), downloads images only from
+    the run it triggered (checked by commit SHA), refuses to run with
+    uncommitted or untracked changes, and never pushes outside `goldens/`.
+    Flow: commit the change on a work branch with `--no-verify` (goldens
+    are stale), run the script, review, `git commit --amend` through the
+    gate (must pass), merge. This is the only sanctioned `--no-verify`, and
+    only on a work branch. `--local` renders with your own GPU for
+    experiments; never commit those.
   - On a mismatch, expected/actual/diff images go to
     `target/tmp/render-failures/` and CI uploads them as the
     `render-failures-<os>` artifact. Never set `WGPU_BACKEND` to an

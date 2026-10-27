@@ -463,6 +463,13 @@ export interface CurveKey {
  *       converter owns the flip to and from its target's convention.
  *     - Filtering: bilinear (magnification and minification), address mode
  *       clamp-to-edge on both axes, no mipmaps.
+ *     - Note (non-normative): bilinear filtering PRECISION is
+ *       implementation-dependent (GPU interpolation weights are often only
+ *       8 bits). Measured on a soft alpha ramp magnified 5.5x: up to 24/255
+ *       difference between adapters (lavapipe x86_64 vs arm64, WARP,
+ *       Metal). Conformance and golden fixtures must therefore avoid
+ *       magnified soft gradients; use one texel per output pixel, or hard
+ *       edges, unless filtering itself is what is being tested.
  *
  * R3. Drawable color. Per fragment, with (Pt, At) the filtered texel, M the
  *     evaluated multiplyColor, S the screenColor and o the drawable's
