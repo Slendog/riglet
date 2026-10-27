@@ -3,3 +3,5 @@
 /fuzz/corpus/
 .DS_Store
 /testing_files_gitignored/
+/fuzz/target/
+/fuzz/Cargo.lock
