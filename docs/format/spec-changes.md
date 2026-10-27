@@ -122,7 +122,9 @@ these:
 - Keyform `positions` has the same `count` as the node's rest positions.
 - BufferRef:
   - `file` is a relative path under `buffers/`, no `..`, no absolute path,
-    no backslash.
+    no drive letter, no backslash.
+- Package: no two ZIP entries whose names differ only by case (they collide
+  on macOS and Windows filesystems).
   - `byteOffset` aligned to the element size (4 for f32/u32, 2 for u16).
   - `byteOffset + count * components * size <= file length`.
   - positions/uvs/warp points: `f32`, components 2.
