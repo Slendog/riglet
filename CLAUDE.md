@@ -131,10 +131,23 @@ depends on format + render + converters. Only the editor depends on egui.
   never exact equality. Results differ slightly between x86_64 and arm64.
 - **GPU in tests:** headless render tests must run without a real GPU: CI
   uses Mesa lavapipe (Linux), WARP (Windows), and Metal (macOS).
-- **Golden images:** render tests use a per-pixel tolerance plus a maximum
-  number of differing pixels, because GPU backends rasterize slightly
-  differently. Goldens live in `tests/fixtures/` and come from our own
-  synthetic models only.
+- **Golden images:** render tests use a per-channel tolerance (4/255) plus
+  a maximum fraction of differing pixels (0.5%), because GPU backends
+  rasterize slightly differently. Fixtures are Rust code in
+  `crates/riglet-fixtures/src/fixtures.rs` (one per rendering feature);
+  goldens live in `crates/riglet-render/tests/goldens/`.
+  - **Reference setup:** lavapipe (Mesa's software Vulkan), Linux x86_64,
+    `WGPU_BACKEND=vulkan`. Regenerate with the manual "Update goldens"
+    workflow, review the images, commit them. Locally,
+    `RIGLET_UPDATE_GOLDENS=1 cargo test -p riglet-render --test render goldens`
+    writes goldens from your own GPU: fine for experiments, never commit
+    those.
+  - **Required on Linux:** CI installs lavapipe and sets
+    `RIGLET_REQUIRE_GPU=1`, so a missing adapter fails the job. Elsewhere,
+    render tests print `SKIPPED` without an adapter; every job writes its
+    adapter (or SKIPPED) to the run summary.
+  - Mismatching images are uploaded as the `render-failures-<os>`
+    artifact.
 - **Editor:** native file dialogs and clipboard via cross-platform crates
   (ask before adding them in M4). Linux builds need X11 and Wayland support.
 

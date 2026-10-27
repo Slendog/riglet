@@ -1,0 +1,32 @@
+# Regenerates the golden images on the reference setup: lavapipe on Linux
+# x86_64 (see CLAUDE.md). Run it by hand after an intended rendering change,
+# download the artifact, review the images, and commit them.
+name: Update goldens
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  goldens:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers
+      - name: Render goldens
+        env:
+          RIGLET_REQUIRE_GPU: "1"
+          RIGLET_UPDATE_GOLDENS: "1"
+          WGPU_BACKEND: vulkan
+        run: cargo test -p riglet-render --test render goldens -- --nocapture
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: goldens-lavapipe-x86_64
+          path: crates/riglet-render/tests/goldens/
