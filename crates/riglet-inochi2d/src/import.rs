@@ -31,33 +31,33 @@ pub struct Import {
 }
 
 const BUFFER_FILE: &str = "buffers/inochi2d.bin";
-const EXT: &str = "inochi2d";
+pub(crate) const EXT: &str = "inochi2d";
 
 // ---------- JSON helpers (tolerant: missing or mistyped = default) ----------
 
-fn num(v: &Value, k: &str) -> Option<f32> {
+pub(crate) fn num(v: &Value, k: &str) -> Option<f32> {
     v.get(k).and_then(Value::as_f64).map(|f| f as f32).filter(|f| f.is_finite())
 }
 
-fn uuid(v: &Value, k: &str) -> Option<u32> {
+pub(crate) fn uuid(v: &Value, k: &str) -> Option<u32> {
     v.get(k).and_then(Value::as_u64).and_then(|u| u32::try_from(u).ok())
 }
 
-fn string<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
+pub(crate) fn string<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
     v.get(k).and_then(Value::as_str)
 }
 
-fn flag(v: &Value, k: &str, default: bool) -> bool {
+pub(crate) fn flag(v: &Value, k: &str, default: bool) -> bool {
     v.get(k).and_then(Value::as_bool).unwrap_or(default)
 }
 
-fn floats(v: Option<&Value>) -> Vec<f32> {
+pub(crate) fn floats(v: Option<&Value>) -> Vec<f32> {
     v.and_then(Value::as_array)
         .map(|a| a.iter().map(|x| x.as_f64().map_or(0.0, |f| f as f32)).collect())
         .unwrap_or_default()
 }
 
-fn vec3(v: &Value, k: &str, default: [f32; 3]) -> [f32; 3] {
+pub(crate) fn vec3(v: &Value, k: &str, default: [f32; 3]) -> [f32; 3] {
     let f = floats(v.get(k));
     let mut out = default;
     for (o, x) in out.iter_mut().zip(f) {
@@ -90,39 +90,39 @@ fn node_id(uuid: u32) -> Id {
 // ---------- 2D affine for baked static transforms ----------
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Affine {
+pub(crate) struct Affine {
     /// Columns: x axis, y axis, translation.
-    m: [[f32; 2]; 3],
+    pub(crate) m: [[f32; 2]; 3],
 }
 
 impl Affine {
-    const IDENTITY: Affine = Affine { m: [[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]] };
+    pub(crate) const IDENTITY: Affine = Affine { m: [[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]] };
 
     /// T * R * S (Inochi2D node transform, rotation in radians).
-    fn trs(t: Vec2, rz: f32, s: Vec2) -> Affine {
+    pub(crate) fn trs(t: Vec2, rz: f32, s: Vec2) -> Affine {
         let (sin, cos) = rz.sin_cos();
         Affine { m: [[cos * s[0], sin * s[0]], [-sin * s[1], cos * s[1]], t] }
     }
 
-    fn then(self, inner: Affine) -> Affine {
+    pub(crate) fn then(self, inner: Affine) -> Affine {
         let lin = |v: Vec2| [self.m[0][0] * v[0] + self.m[1][0] * v[1], self.m[0][1] * v[0] + self.m[1][1] * v[1]];
         let [ix, iy, it] = inner.m;
         let t = lin(it);
         Affine { m: [lin(ix), lin(iy), [t[0] + self.m[2][0], t[1] + self.m[2][1]]] }
     }
 
-    fn point(self, p: Vec2) -> Vec2 {
+    pub(crate) fn point(self, p: Vec2) -> Vec2 {
         [
             self.m[0][0] * p[0] + self.m[1][0] * p[1] + self.m[2][0],
             self.m[0][1] * p[0] + self.m[1][1] * p[1] + self.m[2][1],
         ]
     }
 
-    fn vector(self, v: Vec2) -> Vec2 {
+    pub(crate) fn vector(self, v: Vec2) -> Vec2 {
         [self.m[0][0] * v[0] + self.m[1][0] * v[1], self.m[0][1] * v[0] + self.m[1][1] * v[1]]
     }
 
-    fn inverse(self) -> Option<Affine> {
+    pub(crate) fn inverse(self) -> Option<Affine> {
         let [[a, b], [c, d], [tx, ty]] = self.m;
         let det = a * d - b * c;
         if det.abs() < 1e-12 || !det.is_finite() {
@@ -1856,7 +1856,6 @@ pub fn tint_screen_to_riglet(m: [f32; 3], s: [f32; 3]) -> ([f32; 3], [f32; 3]) {
     (mo, so)
 }
 
-#[allow(dead_code, reason = "used by the exporter (M3 step 2) and the unit tests")]
 /// Inverse of [`tint_screen_to_riglet`] (for export): `M = M' + S' - M'S'`,
 /// `S = S'/M` (with M = 0, any S gives black; use S = 0).
 pub fn tint_screen_from_riglet(m: [f32; 3], s: [f32; 3]) -> ([f32; 3], [f32; 3]) {
@@ -2047,7 +2046,12 @@ pub fn import(bytes: &[u8], options: &Options) -> Result<Import, InochiError> {
         .iter()
         .flat_map(|d| d.positions.iter())
         .fold([0.0f32; 2], |e, p| [e[0].max(p[0].abs()), e[1].max(p[1].abs())]);
-    model.canvas = Canvas { width: (2.0 * extent[0]).ceil().max(1.0), height: (2.0 * extent[1]).ceil().max(1.0) };
+    let size = [(2.0 * extent[0]).ceil().max(1.0), (2.0 * extent[1]).ceil().max(1.0)];
+    // Finite vertices can still overflow here (or evaluate to infinity).
+    if !size.iter().all(|s| s.is_finite()) {
+        return Err(InochiError::Puppet("geometry is out of range (the canvas size overflows)".into()));
+    }
+    model.canvas = Canvas { width: size[0], height: size[1] };
 
     warnings.shrink_to_fit();
     let document = Document { manifest: manifest(warnings.clone()), model, files };

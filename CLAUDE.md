@@ -38,7 +38,7 @@ crates/
   riglet-render/    wgpu renderer: evaluated frame -> pixels (window or offscreen)
   riglet-inochi2d/  .inp/.inx import/export
   riglet-live2d/    model3/physics3/motion3/exp3 JSON, moc3 module
-  riglet-cli/       info / validate / render / import (binary `riglet`)
+  riglet-cli/       info / validate / render / import / export (binary `riglet`)
   riglet-fixtures/  dev-only: model Builder + one render fixture per feature
   riglet-editor/    eframe app
 fuzz/               one fuzz target per importer
@@ -216,11 +216,16 @@ cargo +nightly fuzz run texture_png fuzz/corpus/texture_png fuzz/seeds/texture_p
 cargo +nightly fuzz run inp_container fuzz/corpus/inp_container fuzz/seeds/inp_container -- -timeout=10 -max_len=65536
 cargo +nightly fuzz run inp_json fuzz/corpus/inp_json fuzz/seeds/inp_json -- -timeout=10 -max_len=16384
 cargo +nightly fuzz run tga fuzz/corpus/tga fuzz/seeds/tga -- -timeout=10 -max_len=65536
+cargo +nightly fuzz run inp_export fuzz/corpus/inp_export fuzz/seeds/package -- -timeout=10 -max_len=16384
 cargo test --test malformed -- --ignored write_fuzz_seeds          # regenerate seeds after format changes
 cargo test -p riglet-inochi2d --test malformed -- --ignored        # regenerate Inochi2D seeds
 # Inochi2D sample models (testing_files_gitignored/inochi2d/): warning counts,
 # timing; RIGLET_SHOW_WARNINGS=CODE prints them, RIGLET_RENDER_DIR renders.
 cargo test --release -p riglet-inochi2d --test real_models -- --ignored --nocapture
+# ... against a test-only port of Inochi2D's vertex pipeline (pixel errors)
+cargo test --release -p riglet-inochi2d --test meshgroup_error -- --ignored --nocapture
+# ... import -> export -> import
+cargo test --release -p riglet-inochi2d --test round_trip -- --ignored --nocapture
 ```
 
 ## Fuzzing policy
@@ -240,7 +245,7 @@ cargo test --release -p riglet-inochi2d --test real_models -- --ignored --nocapt
   put the file in `crates/riglet-format/tests/regressions/<target>/`
   (package, model_json), `crates/riglet-render/tests/regressions/texture_png/`
   or `crates/riglet-inochi2d/tests/regressions/<target>/` (inp_container,
-  inp_json, tga), in the same commit as the fix. `tests/regressions.rs`
+  inp_json, tga, inp_export), in the same commit as the fix. `tests/regressions.rs`
   (`regressions()` in `tests/malformed.rs` for Inochi2D) replays every file
   through the same path as the fuzz target.
 
@@ -253,7 +258,8 @@ commands skip it. Check that it still compiles with
 - `riglet info FILE [--json]`, `riglet validate FILE [--json]`,
   `riglet render FILE -o OUT.png [-p NAME=VALUE]... [--scale S]
   [--background RRGGBB] [--software]`,
-  `riglet import FILE.inp|FILE.inx -o OUT.riglet [--json]` (prints every
+  `riglet import FILE.inp|FILE.inx -o OUT.riglet [--json]`,
+  `riglet export FILE.riglet -o OUT.inp [--json]` (both print every
   `ConversionWarning`; warnings don't change the exit code).
 - **Exit codes (stable):** 0 = OK, 1 = the file is invalid (validation
   issues, not a readable package, or an Inochi2D file that can't be

@@ -53,6 +53,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "inp_export"
+path = "fuzz_targets/inp_export.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "tga"
 path = "fuzz_targets/tga.rs"
 test = false

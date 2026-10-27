@@ -286,3 +286,27 @@ fn import_io_errors_exit_two() {
     assert_eq!(code(&out), 2);
     assert!(text(&out.stderr).contains("cannot write"));
 }
+
+#[test]
+fn export_round_trips_through_import() {
+    let dir = scratch("export");
+    let input = dir.join("puppet.inp");
+    std::fs::write(&input, INOCHI_SEED).unwrap();
+    let package = dir.join("puppet.riglet");
+    assert_eq!(code(&riglet(&["import", input.to_str().unwrap(), "-o", package.to_str().unwrap()])), 0);
+    let output = dir.join("out.inp");
+    let out = riglet(&["export", package.to_str().unwrap(), "-o", output.to_str().unwrap()]);
+    assert_eq!(code(&out), 0, "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("warning(s)"));
+    let again = dir.join("again.riglet");
+    let out = riglet(&["import", output.to_str().unwrap(), "-o", again.to_str().unwrap()]);
+    assert_eq!(code(&out), 0, "{}", text(&out.stderr));
+    assert_eq!(code(&riglet(&["validate", again.to_str().unwrap()])), 0);
+
+    // Not a package: exit 1; unwritable output: exit 2.
+    let bad = dir.join("bad.riglet");
+    std::fs::write(&bad, b"nope").unwrap();
+    assert_eq!(code(&riglet(&["export", bad.to_str().unwrap(), "-o", output.to_str().unwrap()])), 1);
+    let nowhere = dir.join("missing-dir").join("out.inp");
+    assert_eq!(code(&riglet(&["export", package.to_str().unwrap(), "-o", nowhere.to_str().unwrap()])), 2);
+}

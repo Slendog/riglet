@@ -9,10 +9,12 @@
 //! validated with `Rig::prepare` like any file.
 
 pub mod container;
+mod export;
 mod import;
 pub mod reinterpolate;
 pub mod tga;
 
+pub use export::{Export, export};
 pub use import::{Import, Options, import};
 pub use riglet_format::model::ConversionWarning;
 
@@ -38,6 +40,8 @@ pub enum InochiError {
     Texture(String),
     #[error("the converted model failed validation (an importer bug): {0}")]
     InvalidResult(String),
+    #[error("the model to export is invalid: {0}")]
+    InvalidModel(String),
 }
 
 impl InochiError {
@@ -54,6 +58,7 @@ impl InochiError {
             InochiError::Puppet(_) => "INP_PUPPET",
             InochiError::Texture(_) => "INP_TEXTURE",
             InochiError::InvalidResult(_) => "INP_INVALID_RESULT",
+            InochiError::InvalidModel(_) => "INP_INVALID_MODEL",
         }
     }
 }

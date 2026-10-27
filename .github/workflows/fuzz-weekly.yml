@@ -37,6 +37,7 @@ jobs:
           - { target: inp_container, max_len: "65536" }
           - { target: inp_json, max_len: "16384" }
           - { target: tga, max_len: "65536" }
+          - { target: inp_export, max_len: "16384", seeds: package }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install nightly --profile minimal
@@ -61,7 +62,7 @@ jobs:
           [[ "$MINUTES" =~ ^[0-9]+$ ]] || { echo "minutes must be a number"; exit 2; }
           mkdir -p fuzz/corpus/${{ matrix.target }}
           cargo +nightly fuzz run ${{ matrix.target }} \
-            fuzz/corpus/${{ matrix.target }} fuzz/seeds/${{ matrix.target }} -- \
+            fuzz/corpus/${{ matrix.target }} fuzz/seeds/${{ matrix.seeds || matrix.target }} -- \
             -max_total_time=$((MINUTES * 60)) -timeout=10 -rss_limit_mb=2048 \
             -max_len=${{ matrix.max_len }} 2>&1 | tail -n 200
       - name: Upload crash inputs

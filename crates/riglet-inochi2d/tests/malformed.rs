@@ -153,7 +153,7 @@ fn mutated_tga_never_panics() {
 #[test]
 fn regressions() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/regressions");
-    for target in ["inp_container", "inp_json", "tga"] {
+    for target in ["inp_container", "inp_json", "tga", "inp_export"] {
         for entry in std::fs::read_dir(root.join(target)).unwrap() {
             let path = entry.unwrap().path();
             if path.file_name().is_some_and(|n| n == "README.md") {
@@ -165,6 +165,18 @@ fn regressions() {
                 "inp_json" => {
                     if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                         exercise(&package(&v, vec![(Encoding::Png, white_png())]));
+                    }
+                }
+                "inp_export" => {
+                    // Same as the fuzz target: a valid package exports and
+                    // imports again into a valid model.
+                    let limits = riglet_format::Limits::default();
+                    if let Ok(doc) = riglet_format::read_package_bytes(&bytes, &limits)
+                        && riglet_format::Rig::prepare(&doc, &limits).is_ok()
+                    {
+                        let ex = riglet_inochi2d::export(&doc).unwrap();
+                        let back = riglet_inochi2d::import(&ex.bytes, &Default::default()).unwrap();
+                        riglet_format::Rig::prepare(&back.document, &limits).unwrap();
                     }
                 }
                 _ => {

@@ -1,4 +1,4 @@
-//! `riglet`: inspect, validate, render and import `.riglet` packages.
+//! `riglet`: inspect, validate, render, import and export `.riglet` packages.
 //!
 //! Exit codes (stable, documented in `riglet --help`):
 //!   0  OK
@@ -32,7 +32,7 @@ const EXIT_ERROR: u8 = 2;
 #[command(
     name = "riglet",
     version,
-    about = "Inspect, validate, render and import .riglet rig packages",
+    about = "Inspect, validate, render, import and export .riglet rig packages",
     after_help = "Exit codes: 0 = OK, 1 = the file is invalid (validation issues, or not importable), \
                   2 = error (I/O, no GPU adapter, bad arguments)."
 )]
@@ -90,6 +90,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Convert a package to an Inochi2D puppet (`.inp`). Every lossy step
+    /// is listed as a warning with a stable code.
+    Export {
+        file: PathBuf,
+        /// Output `.inp` path.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Print the warnings as JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// A failure with its exit code.
@@ -123,6 +134,7 @@ fn main() -> ExitCode {
             render(&file, &output, &params, scale, background.as_deref(), software)
         }
         Command::Import { file, output, json } => import(&file, &output, json),
+        Command::Export { file, output, json } => export(&file, &output, json),
     };
     match result {
         Ok(code) => ExitCode::from(code),
@@ -352,6 +364,34 @@ fn render(
     Ok(EXIT_OK)
 }
 
+fn print_warnings(
+    warnings: &[riglet_format::model::ConversionWarning],
+    path: &Path,
+    output: &Path,
+    json: bool,
+) -> Result<(), Failure> {
+    if json {
+        return print_json(&serde_json::json!({ "output": output.display().to_string(), "warnings": warnings }));
+    }
+    for w in warnings {
+        match &w.object_id {
+            Some(id) => println!("warning {} [{id}]: {}", w.code, w.message),
+            None => println!("warning {}: {}", w.code, w.message),
+        }
+    }
+    eprintln!("{} -> {}: {} warning(s)", path.display(), output.display(), warnings.len());
+    Ok(())
+}
+
+fn export(path: &Path, output: &Path, json: bool) -> Result<u8, Failure> {
+    let doc = read(path)?;
+    let exported =
+        riglet_inochi2d::export(&doc).map_err(|e| invalid(format!("{}: {} ({})", path.display(), e, e.code())))?;
+    std::fs::write(output, &exported.bytes).map_err(|e| error(format!("cannot write {}: {e}", output.display())))?;
+    print_warnings(&exported.warnings, path, output, json)?;
+    Ok(EXIT_OK)
+}
+
 fn import(path: &Path, output: &Path, json: bool) -> Result<u8, Failure> {
     let options = riglet_inochi2d::Options {
         inx: path.extension().is_some_and(|e| e.eq_ignore_ascii_case("inx")),
@@ -370,17 +410,6 @@ fn import(path: &Path, output: &Path, json: bool) -> Result<u8, Failure> {
     let package = riglet_format::write_package_bytes(&imported.document)
         .map_err(|e| error(format!("cannot write {}: {e}", output.display())))?;
     std::fs::write(output, package).map_err(|e| error(format!("cannot write {}: {e}", output.display())))?;
-    let warnings = &imported.warnings;
-    if json {
-        print_json(&serde_json::json!({ "output": output.display().to_string(), "warnings": warnings }))?;
-    } else {
-        for w in warnings {
-            match &w.object_id {
-                Some(id) => println!("warning {} [{id}]: {}", w.code, w.message),
-                None => println!("warning {}: {}", w.code, w.message),
-            }
-        }
-        eprintln!("{} -> {}: {} warning(s)", path.display(), output.display(), warnings.len());
-    }
+    print_warnings(&imported.warnings, path, output, json)?;
     Ok(EXIT_OK)
 }

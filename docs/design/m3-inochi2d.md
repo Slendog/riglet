@@ -322,6 +322,29 @@ dropped delta (in pixels or units), so a rigger can see whether it matters.
 Alternative: a least-squares additive fit (smaller average error, but not
 exact anywhere in particular). I recommend the default-anchored split.
 
+### 5b. Export status (first slice, `src/export.rs`)
+
+Done: node tree (with 5a), transforms (recorded values restored when the
+Riglet rotation still matches, else derived; x/y rotations fold into the
+scale), meshes un-baked, textures (PNG; raw bytes of undecodable imported
+ones restored at their slot), masks, composites, blend modes (additive ->
+AddGlow, `BLEND_MODE_APPROXIMATED`), tint/screen (inverse order
+conversion), parameters (axis points = the union of every set's keys),
+bindings from single-parameter sets (deform, t.x/t.y, r.z, s.x/s.y as
+factors, opacity, tint/screen, zSort with the subtree rule), linear /
+cubic / Nearest (the importer's step shape is recognized, else
+`STEP_AS_NEAREST`), multi-parameter sets split through the defaults
+(`KEYFORM_INTERACTION_DROPPED`), EXT_SECT entries, recorded meta,
+physics, automation and animations. CLI `riglet export`. Fuzz target
+`inp_export`. Aka and Midori round-trip with no warnings (max 0.0005 px).
+
+Not yet: pairing two 1D parameters into a 2D one (section 0, item 3),
+warp deformers (`WARP_UNSUPPORTED`), native rigid rotation deformers under
+mesh deformers, motions written from Riglet data (`MOTIONS_DROPPED` when
+there are no recorded animations), physics (`PHYSICS_DROPPED`), the
+`org.riglet.model` EXT_SECT entry, `.inx` output, and the manual check in
+Inochi Creator / Session.
+
 ### 5a. Export: undoing the importer's restructuring (added after the import review)
 
 The importer does not map nodes 1:1, so export first groups Riglet nodes
