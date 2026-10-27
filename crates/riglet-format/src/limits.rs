@@ -22,7 +22,7 @@ pub struct Limits {
     /// Loader resource budget, not a format rule: maximum mesh-deformer
     /// binding work (candidate triangle tests plus grid cells visited, see
     /// [`crate::bind::TriangleGrid::work`]). Exceeding it fails with
-    /// `LIMIT_MESH_BINDING`. 2^28 is about 2 s in release.
+    /// `LIMIT_MESH_BINDING`. 2^26 is about 0.25 s in release on an Apple M4.
     pub binding_work_budget: u64,
 }
 
@@ -42,7 +42,7 @@ impl Default for Limits {
             max_keyform_vertices_total: 33_554_432,
             max_keyform_grid: 65_536,
             max_texture_dimension: 16_384,
-            binding_work_budget: 1 << 28,
+            binding_work_budget: 1 << 26,
         }
     }
 }

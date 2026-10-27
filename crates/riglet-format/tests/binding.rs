@@ -21,16 +21,6 @@ fn heavy() -> std::sync::MutexGuard<'static, ()> {
     HEAVY.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Wall-clock limits scale with `RIGLET_TIMING_SCALE` (default 1). CI sets
-/// it per runner in the matrix, with a justification in CLAUDE.md, for
-/// runners much slower than a current desktop (macos-15-intel: about 5x an
-/// Apple M4 on this test). The work budget itself is deterministic and does
-/// not scale.
-fn limit(seconds: u64) -> Duration {
-    let scale: u64 = std::env::var("RIGLET_TIMING_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1).clamp(1, 10);
-    Duration::from_secs(seconds * scale)
-}
-
 struct Rng(u64);
 
 impl Rng {
@@ -166,7 +156,7 @@ fn adversarial_binding_is_rejected_quickly() {
     let issues = validate(&doc, &Limits::default());
     let elapsed = start.elapsed();
     assert!(issues.iter().any(|i| i.code == "LIMIT_MESH_BINDING"), "{issues:?}");
-    assert!(elapsed < limit(5), "rejection took {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "rejection took {elapsed:?}");
 }
 
 #[test]
@@ -178,7 +168,7 @@ fn adversarial_binding_below_the_budget_loads() {
     let rig = Rig::prepare(&b.document(), &Limits::default()).unwrap();
     let elapsed = start.elapsed();
     assert!(rig.binding_work() < Limits::default().binding_work_budget);
-    assert!(elapsed < limit(5), "binding took {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "binding took {elapsed:?}");
 }
 
 /// Release timing of the full-size rejection:
@@ -193,7 +183,7 @@ fn adversarial_binding_rejection_time_in_release() {
     let elapsed = start.elapsed();
     eprintln!("rejection at the default budget took {elapsed:?}");
     assert!(issues.iter().any(|i| i.code == "LIMIT_MESH_BINDING"));
-    assert!(elapsed < limit(5), "rejection took {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "rejection took {elapsed:?}");
 }
 
 /// A large, well-behaved mesh: 20 000 triangles, 65 536 child points.
@@ -231,7 +221,7 @@ fn large_well_behaved_mesh_loads_with_default_limits() {
     let rig = rig.unwrap_or_else(|issues| panic!("{issues:?}"));
     eprintln!("binding work {} in {elapsed:?}", rig.binding_work());
     assert!(rig.binding_work() < Limits::default().binding_work_budget / 16);
-    assert!(elapsed < limit(10), "binding took {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(10), "binding took {elapsed:?}");
 }
 
 /// Small mesh built with exact arithmetic only (no sin/cos), so the input
@@ -272,4 +262,66 @@ fn binding_work_is_deterministic() {
     let b = Rig::prepare(&doc, &Limits::default()).unwrap().binding_work();
     assert_eq!(a, b);
     assert_eq!(a, DETERMINISM_GOLDEN_WORK, "binding work changed: {a}");
+}
+
+/// A dense but legitimate worst case: layered hair. Twelve curved strand
+/// meshes (4 x 80 quads each, 7,680 triangles in all) overlap heavily in
+/// one region and form one mesh deformer; 40 overlapping strand drawables
+/// (3 x 100 vertices each, 12,000 points) are bound to it. The strands are
+/// longer than the deformer (396 px vs 320), so their tips take the
+/// nearest-triangle search, the expensive path. Exact arithmetic only (no
+/// sin/cos), so the count is the same everywhere.
+fn layered_hair_rig() -> Builder {
+    let mut b = Builder::new();
+    let (cols, rows) = (4usize, 80usize);
+    let mut pos: Vec<[f32; 2]> = Vec::new();
+    let mut idx: Vec<u16> = Vec::new();
+    for layer in 0..12usize {
+        let base = pos.len() as u16;
+        // Strands fan out from the crown: offset and curvature per layer.
+        let dx = layer as f32 * 3.0 - 18.0;
+        let bend = (layer as f32 - 5.5) * 0.004;
+        for r in 0..=rows {
+            let t = r as f32 * 4.0; // 0..320 px down the strand
+            let center = dx + bend * t * t * 0.1;
+            for c in 0..=cols {
+                pos.push([center + (c as f32 - 2.0) * 6.0, t]);
+            }
+        }
+        let stride = (cols + 1) as u16;
+        for r in 0..rows as u16 {
+            for c in 0..cols as u16 {
+                let i = base + r * stride + c;
+                idx.extend([i, i + 1, i + stride, i + 1, i + stride + 1, i + stride]);
+            }
+        }
+    }
+    b.mesh_deformer("hair_deformer", "root", &pos, &idx);
+    for strand in 0..40usize {
+        let dx = strand as f32 * 1.1 - 22.0;
+        let bend = (strand as f32 - 19.5) * 0.0008;
+        let mut points = Vec::new();
+        for r in 0..100usize {
+            let t = r as f32 * 4.0;
+            let center = dx + bend * t * t * 0.1;
+            for c in 0..3usize {
+                points.push([center + (c as f32 - 1.0) * 4.0, t]);
+            }
+        }
+        b.drawable(&format!("strand{strand}"), "hair_deformer", &points);
+    }
+    b
+}
+
+#[test]
+fn layered_hair_binds_well_within_the_budget() {
+    let _serial = heavy();
+    let doc = layered_hair_rig().document();
+    let start = Instant::now();
+    let rig = Rig::prepare(&doc, &Limits::default()).unwrap_or_else(|i| panic!("{i:?}"));
+    let elapsed = start.elapsed();
+    let work = rig.binding_work();
+    eprintln!("layered hair: binding work {work} in {elapsed:?}");
+    // Realistic worst case: keep at least 10x headroom under the budget.
+    assert!(work * 10 < Limits::default().binding_work_budget, "work {work} is within 10x of the budget");
 }

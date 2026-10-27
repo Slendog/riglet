@@ -107,13 +107,9 @@ depends on format + render + converters. Only the editor depends on egui.
   `macos-15-intel` is GitHub's last Intel image (announced until about
   August 2027). **Decision needed before then:** drop Intel macOS
   support, keep it untested, or find other Intel CI.
-- **Timing tests:** wall-clock limits (binding rejection < 5 s, etc.)
-  scale by `RIGLET_TIMING_SCALE`, set per runner in the CI matrix. Default
-  1. Entries (each needs a reason here):
-  - `macos-15-intel`: 2. The runner is about 5x slower than an Apple M4 on
-    the adversarial-binding test (2^28 work units in 5.16 s release vs
-    1.06 s); the deterministic work budget still rejects the file, only
-    the time limit scales.
+- **Timing tests:** wall-clock limits (binding rejection < 5 s, etc.) are
+  the same on every runner; there is no per-runner scale. If a runner
+  misses a limit, report it instead of loosening the limit.
 - **Toolchain pin:** `rust-toolchain.toml` pins Rust (currently 1.99.1) so a
   new stable release can't break CI overnight. Dependabot can't update this
   file, so the weekly `latest-stable` workflow is the signal: once it has

@@ -645,11 +645,17 @@ export interface CurveKey {
  * the same way on every platform.
  *
  * Riglet's budgets (documentation only; other readers choose their own):
- *   Mesh-deformer binding work           2^28 units (one unit = one
+ *   Mesh-deformer binding work           2^26 units (one unit = one
  *                                       candidate point-vs-triangle test
  *                                       or one grid cell visited by
- *                                       Riglet's binding index); about 2 s
- *                                       in release on current hardware.
+ *                                       Riglet's binding index); the worst
+ *                                       case is rejected in about 0.27 s
+ *                                       in release on an Apple M4. Real
+ *                                       meshes use far less: a 20,000-
+ *                                       triangle mesh with 65,536 points
+ *                                       241,878 units, layered hair (12
+ *                                       overlapping strand meshes, 12,000
+ *                                       points) 71,883 units.
  *                                       Issue code LIMIT_MESH_BINDING.
  *
  * Riglet's renderer budgets (checked before any GPU allocation; clear
