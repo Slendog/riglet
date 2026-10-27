@@ -1,6 +1,99 @@
 # M3 design: Inochi2D import/export (PROPOSAL, for review)
 
-Status: proposed 2026-10-27. Nothing here is implemented yet.
+Status: APPROVED with amendments 2026-10-27 (section 0). Implementation in progress.
+
+## 0. Review decisions and source checks (2026-10-27)
+
+These override the sections below where they differ.
+
+1. **Textures:** in-house TGA decoder for exactly the variants in section 2
+   (truecolor 24/32-bit and grayscale 8-bit, uncompressed and RLE, both
+   origins); everything else is a clear error. BC7: placeholder +
+   `TEXTURE_UNDECODABLE`, raw bytes kept for re-export. Export writes PNG.
+   Manual check added to the test plan (section 9).
+2. **Spec v0.4.0** takes S1, S2 and S4 together (see spec-changes.md).
+   - S2 combine order checked in Inochi2D 0.8.7: every bindable property
+     is either additive (`transform.t.*`, `transform.r.*`, `zSort`,
+     `screenTint.*`, `emissionStrength`) or multiplicative (`transform.s.*`,
+     `opacity`, `tint.*`, `alphaThreshold`), never both. Offsets reset per
+     frame (`beginUpdate`: opacity 1, tint (1,1,1), screenTint 0) and the
+     final value is clamped after combining (`clamp(tint * offsetTint, 0,
+     1)`, `clamp(offsetOpacity * opacity, 0, 1)`; `part/package.d`
+     l.207-281, 798-803). So `(rest + sum of additive) * product of
+     multiplicative`, then clamp, reproduces it.
+3. **Multi-parameter sets on export:** first pair two 1D parameters into
+   one Inochi2D 2D parameter when a set has exactly two axes from two
+   different 1D parameters (exact); greedy pairing; the default-anchored
+   split with `KEYFORM_INTERACTION_DROPPED` only for what's left. Pairing is
+   recorded in ext and undone on re-import; an info message says the
+   parameter layout seen by tracking setups changes.
+   - Checked in 0.8.7 (`param/binding.d` `interpolateLinear`): a 2D
+     parameter binding is bilinear over `values[x][y]` (lerp along y, then
+     x), i.e. multilinear like a Riglet set; a node bound to one of the pair
+     gets a grid constant along the other axis. Parameter values are mapped
+     to 0..1 and clamped before lookup (`mapValue`), matching E2.
+   - `interpolateNearest` sends ties to the UPPER key (`offset >= 0.5`).
+     The midpoint-key conversion to step axes (section 4) matches that.
+4. **Tint/screen order: converted, not just warned.** For Inochi2D's
+   screen-then-multiply, use `S' = S*M`, `M' = M(1-S)/(1-S*M)` per channel
+   (`S*M = 1` gives `M' = 1, S' = 1`), on rest values and every keyform
+   point. Warn `COLOR_ORDER_INTERPOLATION` (with the largest difference)
+   only where bindings make the result differ between keys. Export applies
+   the inverse. Unit test over a grid of (C, M, S).
+   - **Source check finding:** Inochi2D's shader screens PREMULTIPLIED color
+     as `1 - (1 - t)(1 - S*a)` = `t + S*a - t*S*a` (`shaders/basic/basic.frag`
+     at v0.8.7), where the standard premultiplied screen is `t + S*a - t*S`.
+     The extra factor `a` in the last term means the conversion is exact
+     where the texel is opaque or S = 0; at partial alpha it differs by at
+     most `t*M*S*(1-a)`. No constant per drawable can reproduce that, so the
+     importer warns `COLOR_ORDER_PARTIAL_ALPHA` when S != 0 on a texture with
+     partially transparent texels.
+5. **Blend modes:** see section 4a.
+6. **Real models:** run on Aka and Midori (CC-BY 4.0, never committed, no
+   committed renders), report warning counts by code, answer open questions
+   1-5. No new spec fields from that yet.
+7. **JSON depth:** serde's recursion limit (128) caps node-tree depth at
+   about 60; map that failure to the limit error `INP_NESTING_TOO_DEEP`, with
+   a test.
+
+## 4a. Blend modes (from Inochi2D 0.8.7 `core/nodes/common.d`)
+
+Inochi2D has two paths: with `KHR_blend_equation_advanced` it uses the KHR
+equations for Multiply, Screen, Overlay, Darken, Lighten, ColorDodge,
+ColorBurn, HardLight, SoftLight, Difference, Exclusion; without it
+(`inSetBlendModeLegacy`) fixed-function blending. **Inochi2D's own output
+therefore depends on the GPU.** Riglet matches the legacy path, which is
+deterministic and fixed-function.
+
+(a) Reproducible with fixed-function blending (legacy path), proposed for
+v0.4.0 with a golden fixture each. Premultiplied, `C`/`A` as in R4:
+
+| Inochi2D | GL (legacy) | C | A |
+|---|---|---|---|
+| Screen | `ONE, ONE_MINUS_SRC_COLOR` | Cs + Cd(1 - Cs) | As + Ad(1 - As) |
+| LinearDodge | `ONE, ONE_MINUS_SRC_COLOR` / alpha `ONE, ONE_MINUS_SRC_ALPHA` | same as Screen | same as Screen |
+| Lighten | `GL_MAX` | max(Cs, Cd) | max(As, Ad) |
+| ColorDodge | `DST_COLOR, ONE` | Cs*Cd + Cd | As*Ad + Ad |
+| AddGlow | `ONE, ONE` / alpha `ONE, ONE_MINUS_SRC_ALPHA` | Cs + Cd | As + Ad(1 - As) |
+| Subtract | reverse subtract `ONE_MINUS_DST_COLOR, ONE` / alpha add | Cd - Cs(1 - Cd) | As(1 - Ad) + Ad |
+| Exclusion | `ONE_MINUS_DST_COLOR, ONE_MINUS_SRC_COLOR` / alpha `ONE, ONE` | Cs(1 - Cd) + Cd(1 - Cs) | As + Ad |
+| Inverse | `ONE_MINUS_DST_COLOR, ONE_MINUS_SRC_ALPHA` | Cs(1 - Cd) + Cd(1 - As) | As(1 - Ad) + Ad(1 - As) |
+| DestinationIn | `ZERO, SRC_ALPHA` | Cd*As | Ad*As |
+| ClipToLower | `DST_ALPHA, ONE_MINUS_SRC_ALPHA` | Cs*Ad + Cd(1 - As) | Ad |
+| SliceFromLower | `ZERO, ONE_MINUS_SRC_ALPHA` | Cd(1 - As) | Ad(1 - As) |
+
+Normal and Multiply already exist in Riglet with exactly these legacy
+formulas. LinearDodge is identical to Screen on the legacy path, so it maps
+to `screen`. Riglet's own `additive` (A = Ad, from Live2D) stays; Inochi2D's
+AddGlow differs from it only in alpha, hence its own mode. The KHR
+versions of Multiply/Screen/Lighten/ColorDodge/Exclusion differ from these:
+models rendered by Inochi2D on KHR hardware will look slightly different
+(documented, not fixable).
+
+(b) Needing destination reads in the shader (KHR only; Inochi2D's legacy
+path falls back to Normal for them): Overlay, Darken, ColorBurn, HardLight,
+SoftLight, Difference. These stay approximated as `normal` with
+`BLEND_MODE_UNSUPPORTED` and go to Known gaps.
 
 Sources: the Inochi2D repositories (BSD-2-Clause), read to learn the format:
 `inochi2d` at tag v0.8.7 (commit e2235f6) and `main` (4975d24),
@@ -298,7 +391,14 @@ and tint bindings are common.
   `tga`. Mutation smoke tests on stable, regression replay directories.
 - **Real models:** only from `testing_files_gitignored/`, never committed,
   skipped when absent, not run in CI. Candidates: the official example
-  models Aka and Midori (CC-BY 4.0, which allows this use).
+  models Aka and Midori (CC-BY 4.0, which allows this use). Renders of them
+  are not committed either.
+- **Manual check (before M3 is done):** a Riglet-exported `.inp` opens and
+  renders correctly in Inochi Creator 0.8.6 and Inochi Session 0.8.7.
+- **Color conversion:** unit test of the tint/screen identity over a grid
+  of (C, M, S).
+- **Nesting:** a node tree deeper than serde's limit fails with
+  `INP_NESTING_TOO_DEEP`.
 
 ## 10. Porting and licenses
 
