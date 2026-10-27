@@ -1,0 +1,26 @@
+# Weekly check against the newest stable Rust, ignoring the pin in
+# rust-toolchain.toml. It never blocks pull requests; a failure means the
+# next toolchain bump needs work (usually new clippy lints).
+name: Latest stable
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: stable
+
+jobs:
+  latest-stable:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+      - run: rustc --version
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace

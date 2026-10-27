@@ -1,0 +1,7 @@
+# Pinned so a new stable release (new clippy lints) can't break the build
+# overnight. Bump deliberately, fixing new lints in the same commit. The
+# weekly `latest-stable` workflow reports breakage on the newest stable.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

@@ -104,7 +104,16 @@ depends on format + render + converters. Only the editor depends on egui.
   tests on every push. A change is not done until all of them pass. If a
   runner becomes unavailable, report it; never drop a job silently.
   `macos-15-intel` is GitHub's last Intel image (announced until about
-  August 2027).
+  August 2027). **Decision needed before then:** drop Intel macOS
+  support, keep it untested, or find other Intel CI.
+- **Toolchain pin:** `rust-toolchain.toml` pins Rust (currently 1.99.1) so a
+  new stable release can't break CI overnight. Bump it deliberately and fix
+  new lints in the same commit; `rust-version` in `Cargo.toml` follows the
+  pin. The weekly `latest-stable` workflow reports breakage on the newest
+  stable without blocking anything.
+- **Actions** are pinned to full commit SHAs with the version in a comment.
+  Dependabot (`.github/dependabot.yml`) proposes updates weekly. The
+  toolchain comes from the preinstalled `rustup`, not a third-party action.
 - **Paths:** use `std::path::Path`/`PathBuf` for OS paths, never string
   concatenation with `/` or `\`. Paths *inside* packages (ZIP entries,
   `BufferRef.file`, texture files) are always `/`-separated and relative;
@@ -130,8 +139,10 @@ depends on format + render + converters. Only the editor depends on egui.
 
 ## Build and test
 
-Requires the stable Rust toolchain (rustup); fuzzing also needs nightly
-and `cargo install cargo-fuzz`. CI (`.github/workflows/ci.yml`) runs fmt,
+Requires rustup; `rust-toolchain.toml` selects the pinned toolchain.
+Fuzzing also needs `rustup toolchain install nightly` and
+`cargo +nightly install cargo-fuzz` (always run it as `cargo +nightly fuzz`;
+the pin would otherwise select stable). CI (`.github/workflows/ci.yml`) runs fmt,
 clippy and tests on Linux, macOS and Windows (x86_64 and arm64), plus a short
 fuzz run.
 
@@ -170,7 +181,13 @@ commands skip it. Check that it still compiles with
   slots are stable (node pre-order); `draw_order` lists slots bottom first.
 - Untrusted input must not make loading slow either: any work that grows
   faster than linear in input size needs a cap or an index (see `bind.rs`
-  and `Limits::max_mesh_binding_pairs`), plus an adversarial timing test.
+  and `Limits::binding_work_budget`), plus an adversarial timing test.
+  Budgets count work deterministically (never wall-clock time) and are
+  loader resource limits, not format rules (spec "Loader resource
+  limits"). Their issue codes say so in the message.
+- The dev profile builds `riglet-format` at opt-level 2 (workspace
+  `Cargo.toml`), so debug builds of tests, CLI and editor load realistic
+  files at realistic speed. Debug assertions stay on.
 - `riglet-format` layout: `model` (serde types, on-disk shape only),
   `package` (ZIP I/O + limits), `migrate`, `buffer`, `rig` (validation ->
   prepared `Rig` with indices instead of IDs), `eval` (evaluator),
