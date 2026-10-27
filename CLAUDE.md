@@ -107,10 +107,11 @@ depends on format + render + converters. Only the editor depends on egui.
   August 2027). **Decision needed before then:** drop Intel macOS
   support, keep it untested, or find other Intel CI.
 - **Toolchain pin:** `rust-toolchain.toml` pins Rust (currently 1.99.1) so a
-  new stable release can't break CI overnight. Bump it deliberately and fix
-  new lints in the same commit; `rust-version` in `Cargo.toml` follows the
-  pin. The weekly `latest-stable` workflow reports breakage on the newest
-  stable without blocking anything.
+  new stable release can't break CI overnight. Dependabot can't update this
+  file, so the weekly `latest-stable` workflow is the signal: once it has
+  been green on a new stable for a couple of weeks, bump the pin in its own
+  commit (fixing any new lints in that commit). `rust-version` in
+  `Cargo.toml` follows the pin. `latest-stable` never blocks anything.
 - **Actions** are pinned to full commit SHAs with the version in a comment.
   Dependabot (`.github/dependabot.yml`) proposes updates weekly. The
   toolchain comes from the preinstalled `rustup`, not a third-party action.
@@ -165,6 +166,24 @@ Fuzz crashes become regression tests in
 `fuzz/` is its own Cargo workspace (it needs nightly), so `--workspace`
 commands skip it. Check that it still compiles with
 `cargo check --manifest-path fuzz/Cargo.toml`.
+
+## Commit gate
+
+Every commit must pass `scripts/check.sh` (fmt --check, clippy
+`-D warnings`, tests, fuzz crate compiles). The hook runs it with
+`--staged`, on a checkout of the index, so what is checked is exactly what
+is committed. Enable the hook once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+- Never pipe a check command without `set -o pipefail` (or don't pipe it):
+  a pipe hides the command's exit status. The script uses
+  `set -euo pipefail`.
+- Every commit in history must build and pass on its own (keeps
+  `git bisect` useful). Before pushing, fix broken unpushed commits by
+  squashing, not with a follow-up commit.
 
 ## Code conventions
 
