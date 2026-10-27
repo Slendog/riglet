@@ -213,7 +213,8 @@ pub fn all() -> Vec<Fixture> {
         for y in [0.0f32, 1.0] {
             for x in [0.0f32, 0.5, 1.0] {
                 positions.push([x, y]);
-                uvs.push([x, y]);
+                // A flat color: sample the texel center (no R2 border fade).
+                uvs.push([0.5, 0.5]);
             }
         }
         let indices = [0, 1, 4, 0, 4, 3, 1, 2, 5, 1, 5, 4];
@@ -226,6 +227,21 @@ pub fn all() -> Vec<Fixture> {
             b.drawable_mut(mesh).culling = culling;
         }
         out.push(fixture("culling_fold", b));
+    }
+
+    // R2: transparent border. A 2 x 2 texture of one color (so filtering
+    // inside it is exact on every adapter), magnified 8x. Left: UVs from
+    // -0.5 to 1.5, so the color fades to 0 over one texel past the outer
+    // texel centers and is transparent beyond. Right: UVs between the
+    // texel centers (0.25 to 0.75): never reaches the border, solid.
+    {
+        let mut b = base();
+        b.texture("teal", 2, 2, &solid(2, 2, [30, 160, 170, 255]), false);
+        let uvs = |lo: f32, hi: f32| [[lo, lo], [hi, lo], [hi, hi], [lo, hi]];
+        let rect = |x0: f32, y0: f32, x1: f32, y1: f32| [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+        b.mesh("fade", "root", "teal", &rect(-22.0, -16.0, 10.0, 16.0), &uvs(-0.5, 1.5), &[0, 1, 2, 0, 2, 3]);
+        b.mesh("inset", "root", "teal", &rect(12.0, -8.0, 20.0, 0.0), &uvs(0.25, 0.75), &[0, 1, 2, 0, 2, 3]);
+        out.push(fixture("texture_border", b));
     }
 
     out

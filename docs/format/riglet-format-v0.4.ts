@@ -496,8 +496,14 @@ export interface CurveKey {
  *     - UV (0, 0) is the image's top-left corner, +v points down, (1, 1) is
  *       the bottom-right corner; texel centers at (i + 0.5) / width. Each
  *       converter owns the flip to and from its target's convention.
- *     - Filtering: bilinear (magnification and minification), address mode
- *       clamp-to-edge on both axes, no mipmaps.
+ *     - Filtering: bilinear (magnification and minification), no mipmaps.
+ *       Address mode: clamp-to-border with a transparent black (0, 0, 0, 0)
+ *       border on both axes (as Inochi2D): past the outermost texel centers
+ *       the edge texel fades to 0 over one texel. Equivalently, per axis
+ *       with x = u * W - 0.5 (W the texture width; likewise v, H): the
+ *       clamp-to-edge bilinear sample times
+ *       clamp(x + 1, 0, 1) * clamp(W - x, 0, 1). UVs that stay between the
+ *       outer texel centers ([0.5 / W, 1 - 0.5 / W]) never see the border.
  *     - Note (non-normative): bilinear filtering PRECISION is
  *       implementation-dependent (GPU interpolation weights are often only
  *       8 bits). Measured on a soft alpha ramp magnified 5.5x: up to 24/255

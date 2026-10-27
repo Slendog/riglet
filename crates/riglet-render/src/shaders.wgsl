@@ -52,10 +52,22 @@ fn mask_value(frag: vec4<f32>) -> f32 {
     return m;
 }
 
+// R2: bilinear with a transparent black border (clamp-to-border), on a
+// clamp-to-edge sampler. Past the outermost texel centers, filtering
+// against the border fades the edge texel linearly to 0 over one texel;
+// clamp-to-edge returns the edge texel there, so scale it per axis by that
+// fade. Exact for premultiplied data (the border is (0, 0, 0, 0)).
+fn sample_bordered(uv: vec2<f32>) -> vec4<f32> {
+    let size = vec2<f32>(textureDimensions(tex));
+    let x = uv * size - 0.5;
+    let f = clamp(x + 1.0, vec2<f32>(0.0), vec2<f32>(1.0)) * clamp(size - x, vec2<f32>(0.0), vec2<f32>(1.0));
+    return textureSample(tex, samp, uv) * (f.x * f.y);
+}
+
 // R3: multiply, then screen, in premultiplied form; then opacity and mask.
 @fragment
 fn fs_drawable(in: VsOut) -> @location(0) vec4<f32> {
-    let t = textureSample(tex, samp, in.uv);
+    let t = sample_bordered(in.uv);
     let p1 = t.rgb * draw.multiply.rgb;
     let p2 = p1 + draw.screen.rgb * t.a - p1 * draw.screen.rgb;
     let o = draw.params.x * mask_value(in.pos);
@@ -67,7 +79,7 @@ fn fs_drawable(in: VsOut) -> @location(0) vec4<f32> {
 // by the blend state: dst = src + dst * (1 - src).
 @fragment
 fn fs_mask(in: VsOut) -> @location(0) vec4<f32> {
-    let a = textureSample(tex, samp, in.uv).a;
+    let a = sample_bordered(in.uv).a;
     var k = a;
     if draw.params.w >= 0.0 {
         k = select(0.0, 1.0, a > draw.params.w);

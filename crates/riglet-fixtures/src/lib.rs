@@ -214,9 +214,13 @@ impl Builder {
     /// An axis-aligned textured quad from `(x0, y0)` to `(x1, y1)` (model
     /// space, +Y down). Both triangles are clockwise on screen, i.e. front
     /// facing (R7). UVs run (0,0) top-left to (1,1) bottom-right.
+    /// A textured rectangle. UVs span the whole texture, except for a 1 x 1
+    /// texture (a flat color): there every corner samples the texel center,
+    /// so R2's transparent border doesn't fade the edges.
     pub fn quad(&mut self, id: &str, parent: &str, texture: &str, min: Vec2, max: Vec2) -> &mut Self {
         let positions = [[min[0], min[1]], [max[0], min[1]], [max[0], max[1]], [min[0], max[1]]];
-        let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let flat = self.model.textures.iter().any(|t| t.id == texture && t.width == 1 && t.height == 1);
+        let uvs = if flat { [[0.5; 2]; 4] } else { [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]] };
         self.mesh(id, parent, texture, &positions, &uvs, &[0, 1, 2, 0, 2, 3])
     }
 
