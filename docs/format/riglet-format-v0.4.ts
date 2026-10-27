@@ -471,8 +471,13 @@ export interface CurveKey {
  *       shape are all >= -1e-6, stop; else cross the edge opposite the
  *       most negative coordinate into the lowest-index other triangle
  *       sharing that edge; stop at the mesh boundary (no such triangle) or
- *       at a zero-area triangle. The result is the triangle reached. This
- *       is O(1) per point and frame (at most 8 steps over per-triangle
+ *       at a zero-area triangle. The result is the triangle the walk is in
+ *       when it stops, whether or not it contains the position: after the
+ *       8th step, at the boundary or at a zero-area triangle, that
+ *       triangle's affine map is applied anyway (barycentrics are not
+ *       clamped, so the point extrapolates). Ties between equally negative
+ *       coordinates go to the lowest corner index. This is deterministic
+ *       and O(1) per point and frame (at most 8 steps over per-triangle
  *       neighbor lists built at load). Every other point keeps its bound
  *       triangle.
  *     - deltas "added" (S7): for a drawable's points, with q the point's

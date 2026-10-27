@@ -654,6 +654,91 @@ fn translate_inside_a_pointwise_frame_only_shifts() {
 }
 
 #[test]
+fn walk_stops_after_eight_steps_and_extrapolates() {
+    use riglet_format::model::MeshParent;
+    // A strip of 12 quads (24 triangles), 10 px each, bent nonlinearly at
+    // p = 1 so every triangle maps differently. A pointwise point bound to
+    // triangle 0 at rest moves 100 px right (about 20 triangles): the walk
+    // (E6, S7) stops after 8 steps and that triangle's map extrapolates.
+    let n = 12usize;
+    let mut pts = Vec::new();
+    for row in [0.0f32, 10.0] {
+        for i in 0..=n {
+            pts.push([i as f32 * 10.0, row]);
+        }
+    }
+    let (top, bot) = (|i: usize| i as u16, |i: usize| (n + 1 + i) as u16);
+    let mut idx = Vec::new();
+    for i in 0..n {
+        idx.extend([top(i), top(i + 1), bot(i), top(i + 1), bot(i + 1), bot(i)]);
+    }
+    let bend = |p: [f32; 2]| [p[0], p[1] + 0.05 * p[0] * p[0] / 10.0];
+    let mut b = Builder::new();
+    b.param("p", 0.0, 1.0, 0.0).param("q", 0.0, 1.0, 0.0);
+    b.mesh_deformer("m", "root", &pts, &idx);
+    let deltas: Vec<[f32; 2]> = pts
+        .iter()
+        .map(|&p| {
+            let q = bend(p);
+            [q[0] - p[0], q[1] - p[1]]
+        })
+        .collect();
+    let kfs = vec![b.positions(&vec![[0.0; 2]; pts.len()]), b.positions(&deltas)];
+    b.set("m", &[linear("p", &[0.0, 1.0])], kfs);
+    b.rotation("r", "m", [5.0, 3.0], 0.0, 1.0);
+    if let Node::Rotation(r) = b.node_mut("r") {
+        r.mesh_parent = Some(MeshParent::Pointwise);
+    }
+    let kfs = vec![Keyform::default(), Keyform { origin: Some([100.0, 0.0]), ..Default::default() }];
+    b.set("r", &[linear("q", &[0.0, 1.0])], kfs);
+    b.drawable("e", "r", &[[0.0, 0.0]]);
+    let rig = b.rig();
+    let got = positions(&rig, &eval(&rig, &[("p", [1.0, 0.0]), ("q", [1.0, 0.0])]), "e")[0];
+
+    // Oracle, from the spec text: walk 8 times from triangle 0 toward the
+    // point, then map through the triangle reached.
+    let q = [105.0f32, 3.0];
+    let tri = |t: usize| [0, 1, 2].map(|k| pts[idx[t * 3 + k] as usize]);
+    let bary = |t: [[f32; 2]; 3], p: [f32; 2]| {
+        let d = (t[1][1] - t[2][1]) * (t[0][0] - t[2][0]) + (t[2][0] - t[1][0]) * (t[0][1] - t[2][1]);
+        let l0 = ((t[1][1] - t[2][1]) * (p[0] - t[2][0]) + (t[2][0] - t[1][0]) * (p[1] - t[2][1])) / d;
+        let l1 = ((t[2][1] - t[0][1]) * (p[0] - t[2][0]) + (t[0][0] - t[2][0]) * (p[1] - t[2][1])) / d;
+        [l0, l1, 1.0 - l0 - l1]
+    };
+    let shares = |a: usize, k: usize| {
+        let (e0, e1) = (idx[a * 3 + (k + 1) % 3], idx[a * 3 + (k + 2) % 3]);
+        (0..idx.len() / 3)
+            .find(|&o| o != a && idx[o * 3..o * 3 + 3].contains(&e0) && idx[o * 3..o * 3 + 3].contains(&e1))
+    };
+    let mut t = 0usize;
+    for _ in 0..8 {
+        let l = bary(tri(t), q);
+        let (k, m) = l.iter().enumerate().fold((0, f32::MAX), |best, (k, &x)| if x < best.1 { (k, x) } else { best });
+        if m >= -1e-6 {
+            break;
+        }
+        match shares(t, k) {
+            Some(o) => t = o,
+            None => break,
+        }
+    }
+    assert!(bary(tri(t), q).iter().any(|&x| x < -1e-3), "the walk must end outside its triangle (t = {t})");
+    let l = bary(tri(t), q);
+    let cur = tri(t).map(bend);
+    let want = [0, 1].map(|c| l[0] * cur[0][c] + l[1] * cur[1][c] + l[2] * cur[2][c]);
+    assert_close(got, want);
+    // The containing triangle would give something else.
+    let quad = 10usize;
+    let contain = if bary(tri(quad * 2), q).iter().all(|&x| x >= -1e-6) { quad * 2 } else { quad * 2 + 1 };
+    let lc = bary(tri(contain), q);
+    let cc = tri(contain).map(bend);
+    let full = [0, 1].map(|c| lc[0] * cc[0][c] + lc[1] * cc[1][c] + lc[2] * cc[2][c]);
+    assert!((got[1] - full[1]).abs() > 0.1, "{got:?} vs full lookup {full:?}");
+    // Deterministic.
+    assert_eq!(got, positions(&rig, &eval(&rig, &[("p", [1.0, 0.0]), ("q", [1.0, 0.0])]), "e")[0]);
+}
+
+#[test]
 fn mesh_parent_needs_a_mesh_deformer_parent() {
     use riglet_format::model::MeshParent;
     let mut b = Builder::new();
