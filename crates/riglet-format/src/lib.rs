@@ -7,5 +7,11 @@
 //! Spec: `docs/format/riglet-format-v0.2.ts`. Rule IDs (E*, V*) in comments
 //! refer to its Evaluation and Validation sections.
 
+pub mod buffer;
+pub mod limits;
 pub mod migrate;
 pub mod model;
+pub mod package;
+
+pub use limits::Limits;
+pub use package::{Document, PackageError, read_package, read_package_bytes, write_package, write_package_bytes};
