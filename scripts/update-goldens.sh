@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Regenerates the golden images. Never runs automatically.
 #
-#   scripts/update-goldens.sh           Reference goldens for the current
-#                                       COMMIT: rendered on the reference
+#   scripts/update-goldens.sh           Reference goldens for the STAGED
+#                                       state (the index): rendered on the reference
 #                                       setup (lavapipe, Linux x86_64) in CI,
 #                                       downloaded into
 #                                       crates/riglet-render/tests/goldens.
@@ -10,19 +10,20 @@
 #                                       For experiments only: never commit
 #                                       these.
 #
-# Reference mode pushes the current commit to a temporary, uniquely named
-# branch goldens/<UTC timestamp>-<short sha> on the PUBLIC repository, runs
-# the "Update goldens" workflow there, downloads the images from exactly
-# that run (verified by commit SHA), and deletes the branch on success,
-# failure or interrupt. It refuses to run with uncommitted changes and
-# never pushes to any branch outside goldens/.
+# Reference mode builds a temporary commit of the index with git plumbing
+# (`git write-tree` + `git commit-tree`: no hooks run, no branch moves,
+# nothing in your working tree or index changes), pushes it to a uniquely
+# named branch goldens/<UTC timestamp>-<short sha> on the PUBLIC repository,
+# runs the "Update goldens" workflow there, downloads the images from
+# exactly that run (verified by commit SHA), and deletes the branch on
+# success, failure or interrupt. It never pushes outside goldens/.
 #
 # Flow for a rendering or fixture change (CLAUDE.md, "Golden images"):
-#   1. Commit the change on a work branch with `git commit --no-verify`
-#      (its goldens are stale, so the pre-commit gate would fail).
+#   1. `git add` the change (unstaged changes and untracked files are
+#      refused: they would silently not be rendered).
 #   2. scripts/update-goldens.sh
-#   3. Review the images, `git add` them, `git commit --amend` (this time
-#      through the gate, which must pass), then merge.
+#   3. Review the images, `git add` them, and make ONE normal commit with
+#      the change and its goldens; it passes the pre-commit gate.
 #
 # Needs `gh` authenticated with write access to the repository.
 set -euo pipefail
@@ -46,16 +47,18 @@ if [ $# -gt 0 ]; then
     exit 2
 fi
 
-if ! git diff --quiet || ! git diff --cached --quiet; then
-    echo "refusing to run: uncommitted changes (commit them first, see the header)" >&2
+if ! git diff --quiet; then
+    echo "refusing to run: unstaged changes would not be rendered (git add them first)" >&2
     exit 2
 fi
 if [ -n "$(git ls-files --others --exclude-standard)" ]; then
-    echo "refusing to run: untracked files would not be part of the render" >&2
+    echo "refusing to run: untracked files would not be rendered (git add them first)" >&2
     exit 2
 fi
 
-sha="$(git rev-parse HEAD)"
+# Snapshot the index as a commit object only: no hooks, no ref changes.
+tree="$(git write-tree)"
+sha="$(git commit-tree "$tree" -p HEAD -m "goldens snapshot of the index (temporary, never merged)")"
 branch="goldens/$(date -u +%Y%m%dT%H%M%SZ)-${sha:0:12}"
 case "$branch" in
     goldens/*) ;;
@@ -99,4 +102,4 @@ gh run download "$run" --repo "$repo" --name goldens-lavapipe-x86_64 --dir "$tmp
 cp "$tmp"/*.png "$goldens"/
 rm -rf "$tmp"
 git status --short -- "$goldens"
-echo "==> review the images, then amend your commit with them (through the gate)"
+echo "==> review the images, git add them, then commit the change and its goldens together"

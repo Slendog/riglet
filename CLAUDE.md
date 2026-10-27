@@ -143,7 +143,9 @@ depends on format + render + converters. Only the editor depends on egui.
     (`RIGLET_EXPECT_BACKEND`, `RIGLET_EXPECT_ADAPTER`): Vulkan/llvmpipe
     (lavapipe) on Linux, DX12/"Microsoft Basic Render Driver" (WARP) on
     Windows, Metal on macOS (Apple Paravirtual device, both arm64 and
-    Intel). No adapter, another backend or another adapter fails the job,
+    Intel), and GL/llvmpipe (Mesa EGL) with wgpu's WebGL2 downlevel limits
+    in the `ubuntu-24.04-gl-webgl2` job (`RIGLET_DEVICE_LIMITS=webgl2`), so
+    the GL backend and the 2048 px texture limit are tested for real. No adapter, another backend or another adapter fails the job,
     so a silent fallback (e.g. to GL) can't pass. Every job also writes its
     adapter to the run summary.
   - **Skip allow-list (runners where render tests may skip): empty.** Add
@@ -160,16 +162,18 @@ depends on format + render + converters. Only the editor depends on egui.
     integer formulas are checked against an oracle for all 256 x 256
     pairs (`image.rs` unit tests), never only through a toleranced golden.
   - **Updating goldens is explicit:** `scripts/update-goldens.sh`, never
-    automatic. It renders the current COMMIT on lavapipe in CI via a
-    temporary branch `goldens/<UTC timestamp>-<sha>` on the public repo
-    (deleted on success, failure or interrupt), downloads images only from
-    the run it triggered (checked by commit SHA), refuses to run with
-    uncommitted or untracked changes, and never pushes outside `goldens/`.
-    Flow: commit the change on a work branch with `--no-verify` (goldens
-    are stale), run the script, review, `git commit --amend` through the
-    gate (must pass), merge. This is the only sanctioned `--no-verify`, and
-    only on a work branch. `--local` renders with your own GPU for
-    experiments; never commit those.
+    automatic. It snapshots the STAGED state as a temporary commit object
+    with git plumbing (`git write-tree` + `git commit-tree`: no hooks run,
+    no branch moves), pushes it to a unique temporary branch
+    `goldens/<UTC timestamp>-<sha>` on the public repo (deleted on
+    success, failure or interrupt), renders on lavapipe in CI, and
+    downloads images only from the run it triggered (checked by commit
+    SHA). It refuses unstaged changes and untracked files and never pushes
+    outside `goldens/`. Flow: `git add` the change, run the script, review
+    the images, `git add` them, make ONE normal commit with change and
+    goldens (it passes the gate). There is no sanctioned hook bypass
+    anywhere. `--local` renders with your own GPU for experiments; never
+    commit those.
   - On a mismatch, expected/actual/diff images go to
     `target/tmp/render-failures/` and CI uploads them as the
     `render-failures-<os>` artifact. Never set `WGPU_BACKEND` to an
