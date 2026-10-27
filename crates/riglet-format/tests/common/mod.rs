@@ -60,7 +60,13 @@ impl Builder {
         root.parent = None;
         nodes.insert(
             "root".to_owned(),
-            Node::Group(GroupNode { base: root, composite: false, rest: OpacityRest { opacity: 1.0 } }),
+            Node::Group(GroupNode {
+                base: root,
+                composite: false,
+                blend_mode: None,
+                masks: None,
+                rest: GroupRest { opacity: 1.0, draw_order: None },
+            }),
         );
         let mut files = BTreeMap::new();
         files.insert("textures/t.png".to_owned(), PNG_1X1.to_vec());
@@ -130,7 +136,34 @@ impl Builder {
     }
 
     pub fn group(&mut self, id: &str, parent: &str, opacity: f32) -> &mut Self {
-        self.insert(Node::Group(GroupNode { base: base(id, parent), composite: false, rest: OpacityRest { opacity } }));
+        self.insert(Node::Group(GroupNode {
+            base: base(id, parent),
+            composite: false,
+            blend_mode: None,
+            masks: None,
+            rest: GroupRest { opacity, draw_order: None },
+        }));
+        self
+    }
+
+    /// A composite group (R6) with its own draw order.
+    pub fn composite(&mut self, id: &str, parent: &str, opacity: f32, draw_order: f32) -> &mut Self {
+        self.insert(Node::Group(GroupNode {
+            base: base(id, parent),
+            composite: true,
+            blend_mode: None,
+            masks: None,
+            rest: GroupRest { opacity, draw_order: Some(draw_order) },
+        }));
+        self
+    }
+
+    pub fn set_draw_order(&mut self, id: &str, draw_order: f32) -> &mut Self {
+        match self.node_mut(id) {
+            Node::Drawable(d) => d.rest.draw_order = draw_order,
+            Node::Group(g) => g.rest.draw_order = Some(draw_order),
+            _ => panic!("{id} has no draw order"),
+        }
         self
     }
 

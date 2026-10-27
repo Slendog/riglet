@@ -8,13 +8,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
 use crate::buffer::{self, BufferError};
-use crate::eval::{self, Bindings, DeformerState};
+use crate::eval::{self, Bindings, DeformerState, Member};
 use crate::geometry;
 use crate::limits::Limits;
 use crate::migrate::{CURRENT_SCHEMA_VERSION, FORMAT_NAME};
 use crate::model::{
-    AxisInterpolation, BlendMode, BufferRef, CurveInterp, Id, Keyform, KeyformSet, MaskMode, MotionTarget, Node,
-    ParamAxis, ParamKind, Rgb, Vec2,
+    AxisInterpolation, BlendMode, BufferRef, CurveInterp, Id, Keyform, KeyformSet, MaskMode, MaskRef, MotionTarget,
+    Node, ParamAxis, ParamKind, Rgb, Vec2,
 };
 use crate::package::{Document, check_package_path};
 
@@ -76,6 +76,10 @@ pub struct RigSet {
 pub enum RigKind {
     Group {
         composite: bool,
+        /// Composite layer fields (R6); defaults for non-composites.
+        blend_mode: BlendMode,
+        masks: Vec<(usize, MaskMode)>,
+        draw_order: f32,
     },
     Drawable {
         texture: usize,
@@ -142,6 +146,14 @@ pub struct Rig {
     /// Node indices of every drawable, in pre-order: the slots of
     /// [`crate::EvalOutput::drawables`].
     pub drawables: Vec<usize>,
+    /// Node indices of every composite group, in pre-order: the slots of
+    /// [`crate::EvalOutput::composites`].
+    pub composites: Vec<usize>,
+    /// Per node: its drawable or composite slot, if it is a scope member.
+    pub(crate) slot: Vec<Option<Member>>,
+    /// Per node: composite slot of its nearest composite ancestor (its draw
+    /// scope, E4), `None` for the top scope.
+    pub(crate) scope: Vec<Option<usize>>,
     param_index: HashMap<Id, usize>,
     node_index: HashMap<Id, usize>,
     pub(crate) bindings: Bindings,
@@ -176,6 +188,36 @@ impl Rig {
     }
 }
 
+type Scopes = (Vec<usize>, Vec<usize>, Vec<Option<Member>>, Vec<Option<usize>>);
+
+/// Drawable and composite slots, and each node's draw scope (E4). Nodes are
+/// in pre-order, so a parent's scope is known before its children.
+fn scopes(nodes: &[RigNode]) -> Scopes {
+    let (mut drawables, mut composites) = (Vec::new(), Vec::new());
+    let mut slot: Vec<Option<Member>> = Vec::with_capacity(nodes.len());
+    let mut scope: Vec<Option<usize>> = Vec::with_capacity(nodes.len());
+    for (i, node) in nodes.iter().enumerate() {
+        // A composite parent is the scope of its children.
+        let inherited = node.parent.and_then(|p| match slot.get(p) {
+            Some(Some(Member::Composite(c))) => Some(*c),
+            _ => scope.get(p).copied().flatten(),
+        });
+        scope.push(inherited);
+        slot.push(match node.kind {
+            RigKind::Drawable { .. } => {
+                drawables.push(i);
+                Some(Member::Drawable(drawables.len() - 1))
+            }
+            RigKind::Group { composite: true, .. } => {
+                composites.push(i);
+                Some(Member::Composite(composites.len() - 1))
+            }
+            _ => None,
+        });
+    }
+    (drawables, composites, slot, scope)
+}
+
 /// Runs all checks and returns the issues (empty when valid).
 pub fn validate(doc: &Document, limits: &Limits) -> Vec<Issue> {
     match Rig::prepare(doc, limits) {
@@ -207,7 +249,8 @@ struct Allowed {
 fn allowed(node: &Node) -> Allowed {
     let none = Allowed { positions: false, draw_order: false, rotation: false, colors: false };
     match node {
-        Node::Group(_) => none,
+        // Only composites have a draw order (V2).
+        Node::Group(g) => Allowed { draw_order: g.composite, ..none },
         Node::Drawable(_) => Allowed { positions: true, draw_order: true, colors: true, ..none },
         Node::Warp(_) | Node::MeshDeformer(_) => Allowed { positions: true, ..none },
         Node::Rotation(_) => Allowed { rotation: true, ..none },
@@ -267,13 +310,21 @@ impl Validator<'_> {
             );
             return None;
         };
-        let drawables = nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, n)| matches!(n.kind, RigKind::Drawable { .. }))
-            .map(|(i, _)| i)
-            .collect();
-        Some(Rig { params, nodes, textures, drawables, param_index, node_index, bindings, rest_states, binding_work })
+        let (drawables, composites, slot, scope) = scopes(&nodes);
+        Some(Rig {
+            params,
+            nodes,
+            textures,
+            drawables,
+            composites,
+            slot,
+            scope,
+            param_index,
+            node_index,
+            bindings,
+            rest_states,
+            binding_work,
+        })
     }
 
     // ----- V1 -----
@@ -589,7 +640,28 @@ impl Validator<'_> {
         }
 
         let kind = match node {
-            Node::Group(g) => Some(RigKind::Group { composite: g.composite }),
+            Node::Group(g) => {
+                let draw_order = g.rest.draw_order.unwrap_or(0.0);
+                if !draw_order.is_finite() {
+                    self.issue("V8_NON_FINITE", Some(id), "rest drawOrder is not finite");
+                }
+                if !g.composite && (g.blend_mode.is_some() || g.masks.is_some() || g.rest.draw_order.is_some()) {
+                    self.issue(
+                        "V2_COMPOSITE_FIELD",
+                        Some(id),
+                        "blendMode, masks and rest.drawOrder are only allowed on composite groups",
+                    );
+                }
+                // Masks are checked in check_masks once every node is known.
+                let masks =
+                    g.masks.iter().flatten().filter_map(|m| node_index.get(&m.source).map(|&i| (i, m.mode))).collect();
+                Some(RigKind::Group {
+                    composite: g.composite,
+                    blend_mode: g.blend_mode.unwrap_or(BlendMode::Normal),
+                    masks,
+                    draw_order,
+                })
+            }
             Node::Drawable(d) => {
                 let positions = self.vec2s(&d.mesh.positions, id, "positions");
                 let uvs = self.vec2s(&d.mesh.uvs, id, "uvs");
@@ -817,12 +889,16 @@ impl Validator<'_> {
         let mut graph: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         let mut issues = Vec::new();
         for (key, node) in nodes {
-            let Node::Drawable(d) = node else { continue };
-            for m in &d.masks {
+            let masks: &[MaskRef] = match node {
+                Node::Drawable(d) => &d.masks,
+                Node::Group(g) => g.masks.as_deref().unwrap_or(&[]),
+                _ => continue,
+            };
+            for m in masks {
                 if !node_index.contains_key(&m.source) {
                     issues.push(("V3_UNRESOLVED", format!("unknown mask source `{}`", m.source), key));
                 } else if &m.source == key {
-                    issues.push(("V3_MASK_SELF", "a drawable cannot mask itself".to_owned(), key));
+                    issues.push(("V3_MASK_SELF", "a node cannot mask itself".to_owned(), key));
                 } else if !matches!(nodes.get(&m.source), Some(Node::Drawable(_))) {
                     issues.push(("V3_MASK_SOURCE", format!("mask source `{}` is not a drawable", m.source), key));
                 } else {

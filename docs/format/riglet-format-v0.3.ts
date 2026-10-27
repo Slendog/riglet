@@ -1,10 +1,10 @@
 /**
- * Riglet Project Format — v0.2.1
+ * Riglet Project Format — v0.3.0
  *
  * Notation: TypeScript types used as a language-neutral spec.
  * The real implementation can be in any language.
  * Normative rules that types cannot express are in the "Evaluation",
- * "Validation" and "Limits" sections at the end of this file.
+ * "Rendering", "Validation" and "Limits" sections at the end of this file.
  * Rules marked PROVISIONAL may change after verification; a change bumps
  * schemaVersion like any other spec change.
  *
@@ -21,7 +21,7 @@
  *
  * Paths inside the package are always relative and "/"-separated.
  *
- * Changes: see docs/format/spec-changes.md (v0.2.0, v0.2.1).
+ * Changes: see docs/format/spec-changes.md (v0.2.0, v0.2.1, v0.3.0).
  *
  * Versioning policy (schemaVersion is semver):
  *   - patch (0.2.x): clarifications only, no new fields. Any 0.2.x reader
@@ -30,6 +30,11 @@
  *     via `extensions` and unknown-entry preservation. While major is 0, a
  *     reader rejects a newer minor than its own.
  *   - major: breaking changes; readers migrate older majors.
+ *
+ * Migration 0.2.x -> 0.3.0: each composite group gets rest.drawOrder = the
+ * lowest rest.drawOrder of the drawables in its subtree (0 if it has none),
+ * so it sorts where its first drawable used to. This is the migration rule
+ * only; a composite's draw order is its own field (E4, R6).
  */
 
 export type Id = string;           // stable UUID, never shown to the user
@@ -40,7 +45,7 @@ export type RGB = [number, number, number];
 
 export interface Manifest {
   format: "riglet";                // v0.1 files said "rigproj"; migrated on read
-  schemaVersion: string;           // semver, "0.2.1"; see the versioning policy
+  schemaVersion: string;           // semver, "0.3.0"; see the versioning policy
   generator: string;               // app name + version that wrote the file
   provenance: Provenance[];        // import history of this model
 }
@@ -151,8 +156,14 @@ interface NodeBase {
 
 export interface GroupNode extends NodeBase {
   type: "group";                   // Live2D Part, Inochi2D Node/Composite
-  composite: boolean;              // render children offscreen first (Inochi2D Composite)
-  rest: { opacity: number };
+  composite: boolean;              // render the subtree as one layer (R6; Inochi2D Composite)
+  // The fields below are only allowed when composite is true (V2).
+  blendMode?: "normal" | "additive" | "multiply";   // default "normal"; for the finished layer
+  masks?: MaskRef[];               // default []; mask the finished layer (R5)
+  rest: {
+    opacity: number;
+    drawOrder?: number;            // composites only, default 0; keyable via Keyform.drawOrder
+  };
 }
 
 export interface DrawableNode extends NodeBase {
@@ -236,7 +247,7 @@ export interface KeyAxis {
 export interface Keyform {
   positions?: BufferRef;           // drawable vertices / warp / mesh-deformer points
   opacity?: number;
-  drawOrder?: number;              // drawables
+  drawOrder?: number;              // drawables, and composite groups
   angle?: number;                  // rotation deformers, degrees
   origin?: Vec2;                   // rotation deformers
   scale?: number;                  // rotation deformers
@@ -336,12 +347,17 @@ export interface CurveKey {
  *     - Effective opacity = own opacity × parent's effective opacity, for
  *       every node type (groups and deformers included).
  *     - multiplyColor / screenColor apply per drawable; no inheritance.
- *     - Draw order: drawables sorted ascending by evaluated drawOrder
- *       (higher on top). Ties break by depth-first pre-order position in
- *       the node tree (following `children` order).
- *     - Visibility: `visible: false` hides the node and its whole subtree.
- *       PROVISIONAL (decided with mask rendering in M2): whether a hidden
- *       drawable still acts as a mask source.
+ *     - Draw order is sorted per SCOPE. The scopes are the root and every
+ *       composite group. A scope's members are the drawables and composite
+ *       groups whose nearest composite ancestor is that scope (the root if
+ *       none). Members sort ascending by evaluated drawOrder (higher on
+ *       top); ties break by depth-first pre-order position in the node tree
+ *       (following `children` order). A composite member sorts as one unit
+ *       by its own drawOrder; its contents sort only among themselves, in
+ *       its own scope.
+ *     - Visibility: `visible: false` hides the node and its whole subtree
+ *       (it is not drawn). A hidden drawable still works as a mask source
+ *       (R5).
  *
  * E5. Rotation deformer. Local unit = 1 model pixel at rest.
  *     Let R(a) = [[cos a, -sin a], [sin a, cos a]] (a in degrees, converted).
@@ -398,8 +414,7 @@ export interface CurveKey {
  *         dW/du = cols * ((1-t)(P10 - P00) + t(P11 - P01))
  *         dW/dv = rows * ((1-s)(P01 - P00) + s(P11 - P10))
  *
- * E8. Masks. A drawable with masks is drawn only where (clip) or only
- *     outside where (invert) the union of its mask sources is drawn.
+ * E8. Masks. See R5.
  *
  * E9. Motion curves.
  *     - interp on key k describes the segment from key k to key k+1. The
@@ -418,6 +433,112 @@ export interface CurveKey {
  * Use Newton iteration on W with the analytic Jacobian, a bounded iteration
  * count, and a fallback (best iterate, or a search over cells) when it does
  * not converge.
+ *
+ * =====================================================================
+ * RENDERING (normative)
+ * =====================================================================
+ * Notation: premultiplied colors. A source pixel is (Cs, As), the pixel
+ * already in the target is (Cd, Ad), results are (C, A). Colors are RGB in
+ * [0, 1]; products are per channel. Integer formulas are on 8-bit values
+ * and use integer division.
+ *
+ * R1. Color space (PROVISIONAL).
+ *     - Blending, filtering and interpolation work on the stored values
+ *       ("gamma space"); nothing is converted to linear.
+ *     - Textures are uploaded as non-sRGB formats (Rgba8Unorm, never
+ *       Rgba8UnormSrgb): an sRGB texture format would make sampling
+ *       silently linearize them. Render targets are non-sRGB as well.
+ *     - The output PNG holds the same values and is tagged sRGB.
+ *     - Every renderer of a model (CLI, editor viewport) uses the same
+ *       render path and target formats, so they match.
+ *
+ * R2. Textures.
+ *     - Premultiplied everywhere after load.
+ *     - premultipliedAlpha: false -> premultiplied once on load, on the
+ *       8-bit values: c' = (c * a + 127) / 255.
+ *     - premultipliedAlpha: true -> uploaded as is, except a channel with
+ *       c > a is clamped to a (invalid premultiplied data).
+ *     - UV (0, 0) is the image's top-left corner, +v points down, (1, 1) is
+ *       the bottom-right corner; texel centers at (i + 0.5) / width. Each
+ *       converter owns the flip to and from its target's convention.
+ *     - Filtering: bilinear (magnification and minification), address mode
+ *       clamp-to-edge on both axes, no mipmaps.
+ *
+ * R3. Drawable color. Per fragment, with (Pt, At) the filtered texel, M the
+ *     evaluated multiplyColor, S the screenColor and o the drawable's
+ *     opacity (E4 effective opacity, except inside composites, see R6):
+ *         P1 = Pt * M
+ *         P2 = P1 + S * At - P1 * S
+ *         (Cs, As) = (P2 * o, At * o)
+ *     This equals multiply-then-screen on the straight color, premultiplied
+ *     again, and needs no division. It applies to drawables only: not to
+ *     mask coverage, not to composite layers, not inherited.
+ *
+ * R4. Blend modes (drawables and composite layers):
+ *         normal:    C = Cs + Cd * (1 - As)        A = As + Ad * (1 - As)
+ *         additive:  C = Cs + Cd                   A = Ad    (PROVISIONAL)
+ *         multiply:  C = Cs * Cd + Cd * (1 - As)   A = Ad    (PROVISIONAL)
+ *     - Results saturate at 1.
+ *     - additive and multiply keep the destination alpha: they recolor what
+ *       is there and add no coverage. Consequence: additive over (partly)
+ *       transparent pixels can leave C > A, which is not valid
+ *       premultiplied data; R8 clamps it on output. Additive effects outside
+ *       the model's silhouette therefore vanish on a transparent background
+ *       (for example an OBS capture with transparency); over an opaque
+ *       background (CLI --background) they show.
+ *     - The target starts as transparent black (0, 0).
+ *
+ * R5. Masks. A drawable or composite layer with masks gets a per-pixel mask
+ *     value m in [0, 1]; its output (Cs, As) is multiplied by m before
+ *     blending.
+ *     - Coverage k of one source: the source drawable's texture alpha At
+ *       over its CURRENT deformed geometry for this frame, rasterized like
+ *       a drawable (R2, R7). It ignores the source's opacity (PROVISIONAL),
+ *       multiplyColor, screenColor, blend mode, visibility and own masks.
+ *       A hidden source still masks (PROVISIONAL).
+ *     - Combining: clip = 1 - product over clip sources of (1 - k_i);
+ *       invert = 1 - product over invert sources of (1 - k_j);
+ *       m = (clip, or 1 if there is no clip source)
+ *         * (1 - invert, or 1 if there is no invert source).
+ *       That is: inside the union of the clip shapes AND outside the union
+ *       of the invert shapes. The order of MaskRefs never matters.
+ *     - m is continuous (soft masks), not thresholded.
+ *     - Coverage is computed at the output resolution, in canvas space, so
+ *       a source works whether it is inside or outside the masked node's
+ *       composite.
+ *
+ * R6. Composites. A group with composite: true renders as one layer:
+ *     1. Its scope's members (E4), including nested composite layers, are
+ *        drawn in draw order into a cleared transparent offscreen target of
+ *        the output's size, with their own blend modes and masks.
+ *     2. Inside the composite, a member's opacity is the product of the
+ *        opacities from the member up to, but NOT including, the composite
+ *        group. (E4's effective opacity would apply the group's opacity
+ *        twice; overlapping children would show seams.)
+ *     3. The finished layer (Cc, Ac) is drawn into the enclosing scope's
+ *        target as (Cs, As) = (Cc, Ac) * o, where o is the composite's own
+ *        opacity times the opacities of its ancestors up to (not including)
+ *        the next enclosing composite; then masked (R5) and blended with
+ *        the group's blendMode (R4).
+ *     - Composites nest; rule 2 and 3 apply at each level.
+ *     - A hidden composite draws nothing; a composite with nothing visible
+ *       draws nothing.
+ *
+ * R7. Rasterization.
+ *     - Output size W = round(canvas.width * s), H = round(canvas.height * s)
+ *       for output scale s (default 1).
+ *     - Model (x, y) maps to pixel coordinates (x * s + W / 2, y * s + H / 2).
+ *       Pixel (0, 0) is the top-left pixel; pixel centers are at +0.5; the
+ *       fill rule is wgpu's (top-left).
+ *     - No anti-aliasing (no MSAA, no post-process AA).
+ *     - Culling only when drawable.culling is true: triangles that appear
+ *       counter-clockwise on screen (+Y down) are discarded (PROVISIONAL).
+ *       Otherwise both windings are drawn.
+ *
+ * R8. Output image. PNG, RGBA8, straight (non-premultiplied) alpha, W x H.
+ *     Per pixel, from 8-bit premultiplied (p, a):
+ *         p = min(p, a)                          (R4: additive can exceed a)
+ *         c = a == 0 ? 0 : (p * 255 + a / 2) / a
  *
  * =====================================================================
  * VALIDATION (normative)
@@ -439,6 +560,8 @@ export interface CurveKey {
  * V2. Tree
  *     - Exactly one node has parent == null; it equals Model.root and is a
  *       group.
+ *     - A group with composite: false has no blendMode, no masks and no
+ *       rest.drawOrder, and its keyforms don't animate drawOrder.
  *     - parent and children agree for every node. No node is listed twice.
  *     - No cycles; every node is reachable from root.
  *     - A drawable has no children (no node space is defined for them; see
@@ -446,7 +569,8 @@ export interface CurveKey {
  * V3. References
  *     - Every Id reference resolves: texture, mask source, ParamAxis
  *       parameter, physics params, motion targets.
- *     - MaskRef.source is a drawable and not the masked drawable itself.
+ *     - MaskRef.source is a drawable and not the masked drawable itself
+ *       (drawables and composite groups both carry masks).
  *     - The mask graph (drawable -> its mask sources) has no cycles.
  *     - Parameter, texture and motion ids are unique.
  *     - exportIds keys refer to an existing parameter or node.
@@ -521,6 +645,22 @@ export interface CurveKey {
  *                                       in release on current hardware.
  *                                       Issue code LIMIT_MESH_BINDING.
  *
+ * Riglet's renderer budgets (checked before any GPU allocation; clear
+ * errors, never a crash):
+ *   Output image size                    at most 8192 x 8192
+ *   Model texture size                   at most the GPU adapter's max
+ *                                        texture dimension (2048 on some
+ *                                        GL/WebGL adapters); no silent
+ *                                        downscale
+ *   Composite nesting depth              at most 16
+ *   Offscreen memory                     at most 1 GiB in total.
+ *                                        Offscreen targets are allocated
+ *                                        per nesting DEPTH and reused across
+ *                                        sibling composites (mask buffers
+ *                                        likewise), so the need is
+ *                                        (deepest nesting + mask buffers) x
+ *                                        W x H x 4 bytes.
+ *
  * Every other LIMIT_* check measures file contents (counts and sizes), so
  * those are format limits (see Limits), not loader budgets.
  *
@@ -532,13 +672,20 @@ export interface CurveKey {
  *     on KeyformSet, or fill on import and keep the mask in extensions.
  *   - A transform on every node (Parts too); relative, cumulative zSort.
  *   - Multiple textures per Part (albedo, emissive, bump).
- *   - Composite blend mode and tint.
+ *   - Composite tint (multiply/screen color on the layer).
+ *   - Inochi2D's per-drawable mask alpha threshold (R5 masks are soft):
+ *     the importer keeps it in extensions and warns.
  *   - Cubic interpolation of bindings.
  *   - Inochi2D allows children under Parts, which V2 rejects. The importer
  *     restructures them without loss (insert a group, keep transforms),
  *     with a round-trip test.
  *   - Inochi2D packages can hold non-PNG textures (e.g. TGA, BC7); the
  *     importer converts them to PNG.
+ * Rendering:
+ *   - No mipmaps (R2): renders much smaller than the textures alias.
+ *     Deterministic CPU-built mipmaps could fix this later.
+ *   - No anti-aliasing (R7): the renderer will likely want an optional AA
+ *     mode later. Golden images are always rendered without it.
  * Live2D (M5/M6):
  *   - Rotation deformer reflect X/Y.
  *   - Warp quad vs triangle cell interpolation.

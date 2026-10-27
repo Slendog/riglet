@@ -252,11 +252,27 @@ pub struct NodeBase {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GroupNode {
     #[serde(flatten)]
     pub base: NodeBase,
     pub composite: bool,
-    pub rest: OpacityRest,
+    /// Composites only (V2); `None` means normal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend_mode: Option<BlendMode>,
+    /// Composites only (V2); masks the finished layer (R5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub masks: Option<Vec<MaskRef>>,
+    pub rest: GroupRest,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupRest {
+    pub opacity: f32,
+    /// Composites only (V2); `None` means 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_order: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

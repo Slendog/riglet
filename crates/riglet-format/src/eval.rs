@@ -49,13 +49,39 @@ pub struct DrawableFrame {
     /// Node index in [`Rig::nodes`].
     pub node: usize,
     pub positions: Vec<Vec2>,
-    /// Effective opacity (own × ancestors), E4.
+    /// Opacity to draw with: own × ancestors up to, not including, the
+    /// nearest composite (R6). Equals E4's effective opacity outside
+    /// composites.
     pub opacity: f32,
     pub draw_order: f32,
     pub multiply_color: Rgb,
     pub screen_color: Rgb,
     /// False when the node or any ancestor is hidden (model visibility).
     pub visible: bool,
+}
+
+/// A member of a draw scope (the root or a composite, E4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Member {
+    /// Index into [`EvalOutput::drawables`].
+    Drawable(usize),
+    /// Index into [`EvalOutput::composites`].
+    Composite(usize),
+}
+
+/// Evaluated state of one composite group (R6).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CompositeFrame {
+    /// Node index in [`Rig::nodes`].
+    pub node: usize,
+    /// Layer opacity: own × ancestors up to, not including, the next
+    /// enclosing composite (R6 rule 3).
+    pub opacity: f32,
+    pub draw_order: f32,
+    /// False when the group or any ancestor is hidden.
+    pub visible: bool,
+    /// This composite's scope, bottom first.
+    pub members: Vec<Member>,
 }
 
 /// Caller-owned evaluation output. Reuse one per rig across frames: buffers
@@ -65,8 +91,10 @@ pub struct EvalOutput {
     /// One entry per drawable, in node pre-order. The slot for a drawable
     /// never changes for a given rig, so renderers can key GPU buffers on it.
     pub drawables: Vec<DrawableFrame>,
-    /// Indices into `drawables`, bottom first (E4).
-    pub draw_order: Vec<usize>,
+    /// One entry per composite group, in node pre-order (stable slots).
+    pub composites: Vec<CompositeFrame>,
+    /// The top scope (everything outside composites), bottom first.
+    pub members: Vec<Member>,
     scratch: Scratch,
 }
 
@@ -75,9 +103,26 @@ impl EvalOutput {
         Self::default()
     }
 
-    /// Drawables in draw order, bottom first.
-    pub fn in_draw_order(&self) -> impl Iterator<Item = &DrawableFrame> {
-        self.draw_order.iter().filter_map(|&i| self.drawables.get(i))
+    /// Every drawable in final draw order, bottom first, with composite
+    /// contents expanded in place.
+    pub fn in_draw_order(&self) -> Vec<&DrawableFrame> {
+        let mut out = Vec::with_capacity(self.drawables.len());
+        // Explicit stack: composite nesting depth is untrusted.
+        let mut stack: Vec<std::slice::Iter<'_, Member>> = vec![self.members.iter()];
+        while let Some(top) = stack.last_mut() {
+            match top.next() {
+                None => {
+                    stack.pop();
+                }
+                Some(Member::Drawable(i)) => out.extend(self.drawables.get(*i)),
+                Some(Member::Composite(i)) => {
+                    if let Some(c) = self.composites.get(*i) {
+                        stack.push(c.members.iter());
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// The evaluated drawable for node `node`, if it is a drawable.
@@ -438,8 +483,10 @@ impl Rig {
         opacity.clear();
         visible.clear();
         out.drawables.resize_with(self.drawables.len(), DrawableFrame::default);
+        out.composites.resize_with(self.composites.len(), CompositeFrame::default);
 
         let mut slot = 0usize;
+        let mut composite_slot = 0usize;
         for ((node, state), rest_state) in nodes.iter().zip(current.iter_mut()).zip(rest) {
             let point_count = if matches!(node.kind, RigKind::Rotation { .. }) { 0 } else { rest_state.points.len() };
             accum.reset(point_count);
@@ -447,9 +494,13 @@ impl Rig {
                 eval_set(set, values, accum);
             }
 
-            // Parents precede children in pre-order.
+            // Parents precede children in pre-order. Opacity stops at a
+            // composite parent: the composite applies it to the layer (R6).
             let (parent_opacity, parent_visible) = node.parent.map_or((1.0, true), |p| {
-                (opacity.get(p).copied().unwrap_or(1.0), visible.get(p).copied().unwrap_or(true))
+                let parent_is_composite =
+                    matches!(nodes.get(p).map(|n| &n.kind), Some(RigKind::Group { composite: true, .. }));
+                let o = if parent_is_composite { 1.0 } else { opacity.get(p).copied().unwrap_or(1.0) };
+                (o, visible.get(p).copied().unwrap_or(true))
             });
             let own_opacity = (node.opacity + accum.opacity).clamp(0.0, 1.0);
             opacity.push(own_opacity * parent_opacity);
@@ -475,6 +526,12 @@ impl Rig {
                 }
                 slot += 1;
             }
+            if let RigKind::Group { composite: true, draw_order, .. } = &node.kind {
+                if let Some(frame) = out.composites.get_mut(composite_slot) {
+                    frame.draw_order = draw_order + accum.draw_order;
+                }
+                composite_slot += 1;
+            }
         }
 
         let mut bind = BindMode::Lookup(&self.bindings);
@@ -489,13 +546,41 @@ impl Rig {
             map_up(nodes, current, rest, node, &mut frame.positions, &mut bind);
         }
 
-        // Stable sort over pre-order slots: ties keep tree order (E4).
-        out.draw_order.clear();
-        out.draw_order.extend(0..out.drawables.len());
-        let drawables = &out.drawables;
-        out.draw_order.sort_by(|&a, &b| {
-            let key = |i: usize| drawables.get(i).map_or(0.0, |d| d.draw_order);
-            key(a).total_cmp(&key(b))
-        });
+        for (frame, &node) in out.composites.iter_mut().zip(&self.composites) {
+            frame.node = node;
+            frame.opacity = opacity.get(node).copied().unwrap_or(0.0);
+            frame.visible = visible.get(node).copied().unwrap_or(false);
+            frame.members.clear();
+        }
+
+        // Scopes (E4): members in pre-order, then a stable sort by draw
+        // order, so ties keep tree order.
+        out.members.clear();
+        for (index, node_scope) in self.scope.iter().enumerate() {
+            let Some(Some(member)) = self.slot.get(index).copied() else { continue };
+            let list = match node_scope {
+                None => &mut out.members,
+                Some(c) => match out.composites.get_mut(*c) {
+                    Some(frame) => &mut frame.members,
+                    None => continue,
+                },
+            };
+            list.push(member);
+        }
+        let (drawables, composites) = (&out.drawables, &mut out.composites);
+        let key = |m: &Member, composites: &[CompositeFrame]| match *m {
+            Member::Drawable(i) => drawables.get(i).map_or(0.0, |d| d.draw_order),
+            Member::Composite(i) => composites.get(i).map_or(0.0, |c| c.draw_order),
+        };
+        let mut members = std::mem::take(&mut out.members);
+        members.sort_by(|a, b| key(a, composites).total_cmp(&key(b, composites)));
+        out.members = members;
+        for i in 0..composites.len() {
+            let mut list = composites.get_mut(i).map(|c| std::mem::take(&mut c.members)).unwrap_or_default();
+            list.sort_by(|a, b| key(a, composites).total_cmp(&key(b, composites)));
+            if let Some(c) = composites.get_mut(i) {
+                c.members = list;
+            }
+        }
     }
 }

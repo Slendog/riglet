@@ -107,7 +107,7 @@ fn rejects_missing_or_bad_json() {
 fn rejects_newer_schema() {
     let doc = sample();
     let mut manifest = serde_json::to_value(&doc.manifest).unwrap();
-    manifest["schemaVersion"] = "0.3.0".into();
+    manifest["schemaVersion"] = "0.4.0".into();
     let manifest = serde_json::to_vec(&manifest).unwrap();
     let model = serde_json::to_vec(&doc.model).unwrap();
     let r = read(&raw_zip(&[("manifest.json", &manifest), ("model.json", &model)], true));
@@ -177,4 +177,33 @@ fn writer_rejects_reserved_and_unsafe_names() {
     let mut doc = sample();
     doc.files.insert("../x".into(), Vec::new());
     assert!(matches!(write_package_bytes(&doc), Err(PackageError::BadPath { .. })));
+}
+
+#[test]
+fn reads_v0_2_composites_with_migrated_draw_order() {
+    let mut b = Builder::new();
+    b.drawable("x", "root", &[[0.0, 0.0]]).set_draw_order("x", 9.0);
+    b.composite("c", "root", 1.0, 0.0);
+    b.drawable("a", "c", &[[0.0, 0.0]]).set_draw_order("a", 4.0);
+    b.drawable("b2", "c", &[[0.0, 0.0]]).set_draw_order("b2", 6.0);
+    let doc = b.document();
+    // Write it as a v0.2.1 file: no composite drawOrder yet.
+    let mut model = serde_json::to_value(&doc.model).unwrap();
+    model["nodes"]["c"]["rest"].as_object_mut().unwrap().remove("drawOrder");
+    let mut manifest = serde_json::to_value(&doc.manifest).unwrap();
+    manifest["schemaVersion"] = "0.2.1".into();
+    let (manifest, model) = (serde_json::to_vec(&manifest).unwrap(), serde_json::to_vec(&model).unwrap());
+    let bytes = raw_zip(
+        &[
+            ("manifest.json", &manifest),
+            ("model.json", &model),
+            ("buffers/data.bin", &doc.files["buffers/data.bin"]),
+            ("textures/t.png", &doc.files["textures/t.png"]),
+        ],
+        true,
+    );
+    let back = read(&bytes).unwrap();
+    let riglet_format::model::Node::Group(c) = &back.model.nodes["c"] else { panic!() };
+    assert_eq!(c.rest.draw_order, Some(4.0));
+    assert!(riglet_format::Rig::prepare(&back, &Limits::default()).is_ok());
 }

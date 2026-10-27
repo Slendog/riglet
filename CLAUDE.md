@@ -20,7 +20,7 @@ sidecars).
   wgpu, egui/eframe (editor only), clap (CLI only), cargo-fuzz (dev tool).
   Ask before adding anything else that is large.
 - **Spec:** `docs/format/riglet-format-v0.3.ts` (TypeScript notation,
-  language-neutral; `schemaVersion` "0.2.1", versioning policy in its
+  language-neutral; `schemaVersion` "0.3.0", versioning policy in its
   header). Its Evaluation (E*),
   Validation (V*) and Limits sections are normative; cite rule IDs in code
   comments and tests. Rules marked PROVISIONAL may change after verification.

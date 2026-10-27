@@ -223,7 +223,7 @@ fn crossing_draw_order() -> Builder {
 
 fn order(b: &Builder, p: f32) -> Vec<String> {
     let rig = b.rig();
-    eval(&rig, &[("p", [p, 0.0])]).in_draw_order().map(|d| rig.nodes[d.node].id.clone()).collect()
+    eval(&rig, &[("p", [p, 0.0])]).in_draw_order().into_iter().map(|d| rig.nodes[d.node].id.clone()).collect()
 }
 
 #[test]
@@ -249,7 +249,7 @@ fn draw_order_ties_break_by_tree_pre_order() {
     // Tree order: root, g, early, late (g is listed before late).
     let rig = b.rig();
     let out = eval(&rig, &[]);
-    let ids: Vec<&str> = out.in_draw_order().map(|d| rig.nodes[d.node].id.as_str()).collect();
+    let ids: Vec<&str> = out.in_draw_order().into_iter().map(|d| rig.nodes[d.node].id.as_str()).collect();
     assert_eq!(ids, ["early", "late"]);
 }
 
@@ -529,4 +529,80 @@ fn eval_output_is_reused_across_frames() {
     // Slots are stable and in pre-order.
     let ids: Vec<&str> = out.drawables.iter().map(|d| rig.nodes[d.node].id.as_str()).collect();
     assert_eq!(ids, ["d", "e"]);
+}
+
+// ---------- E4/R6: composites ----------
+
+fn ids(rig: &riglet_format::Rig, out: &riglet_format::EvalOutput) -> Vec<String> {
+    out.in_draw_order().into_iter().map(|d| rig.nodes[d.node].id.clone()).collect()
+}
+
+#[test]
+fn composite_sorts_as_one_unit_by_its_own_draw_order() {
+    let mut b = Builder::new();
+    b.drawable("low", "root", &[[0.0, 0.0]]).set_draw_order("low", 1.0);
+    b.drawable("high", "root", &[[0.0, 0.0]]).set_draw_order("high", 10.0);
+    b.composite("c", "root", 1.0, 5.0);
+    // Children's own orders would interleave with low/high if they sorted
+    // globally; inside the composite they only sort among themselves.
+    b.drawable("c_top", "c", &[[0.0, 0.0]]).set_draw_order("c_top", 100.0);
+    b.drawable("c_bottom", "c", &[[0.0, 0.0]]).set_draw_order("c_bottom", -100.0);
+    let rig = b.rig();
+    let out = eval(&rig, &[]);
+    assert_eq!(ids(&rig, &out), ["low", "c_bottom", "c_top", "high"]);
+    assert_eq!(out.members.len(), 3);
+    assert_eq!(out.composites[0].members.len(), 2);
+}
+
+#[test]
+fn composite_draw_order_is_keyable() {
+    let mut b = Builder::new();
+    b.param("p", 0.0, 1.0, 0.0);
+    b.drawable("a", "root", &[[0.0, 0.0]]).set_draw_order("a", 5.0);
+    b.composite("c", "root", 1.0, 0.0);
+    b.drawable("inside", "c", &[[0.0, 0.0]]);
+    let kfs = vec![Keyform::default(), Keyform { draw_order: Some(10.0), ..Default::default() }];
+    b.set("c", &[linear("p", &[0.0, 1.0])], kfs);
+    let rig = b.rig();
+    assert_eq!(ids(&rig, &eval(&rig, &[])), ["inside", "a"]);
+    assert_eq!(ids(&rig, &eval(&rig, &[("p", [1.0, 0.0])])), ["a", "inside"]);
+}
+
+#[test]
+fn opacity_stops_at_the_composite() {
+    let mut b = Builder::new();
+    b.group("outer", "root", 0.5);
+    b.composite("c", "outer", 0.8, 0.0);
+    b.group("g", "c", 0.5).drawable("d", "g", &[[0.0, 0.0]]);
+    let rig = b.rig();
+    let out = eval(&rig, &[]);
+    // Inside: d x g only (R6 rule 2). Layer: c x outer (rule 3).
+    assert_close_f(out.drawables[0].opacity, 0.5);
+    assert_close_f(out.composites[0].opacity, 0.4);
+}
+
+#[test]
+fn nested_composites_form_nested_scopes() {
+    let mut b = Builder::new();
+    b.composite("outer", "root", 1.0, 0.0);
+    b.drawable("a", "outer", &[[0.0, 0.0]]).set_draw_order("a", 2.0);
+    b.composite("inner", "outer", 0.5, 1.0);
+    b.drawable("b", "inner", &[[0.0, 0.0]]).set_draw_order("b", 50.0);
+    b.drawable("c", "inner", &[[0.0, 0.0]]).set_draw_order("c", 40.0);
+    let rig = b.rig();
+    let out = eval(&rig, &[]);
+    assert_eq!(ids(&rig, &out), ["c", "b", "a"]);
+    assert_eq!(out.members, [riglet_format::Member::Composite(0)]);
+    assert_close_f(out.composites[1].opacity, 0.5);
+}
+
+#[test]
+fn hidden_composite_is_marked_hidden() {
+    let mut b = Builder::new();
+    b.composite("c", "root", 1.0, 0.0).drawable("d", "c", &[[0.0, 0.0]]);
+    b.node_mut("c").base_mut().visible = false;
+    let rig = b.rig();
+    let out = eval(&rig, &[]);
+    assert!(!out.composites[0].visible);
+    assert!(!out.drawables[0].visible);
 }

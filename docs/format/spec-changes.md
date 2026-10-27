@@ -7,7 +7,48 @@ normative text; entries here record the reasoning.
 
 ---
 
-## v0.2.2 — rendering semantics (status: PROPOSED)
+## v0.3.0 — rendering semantics and composite fields (status: ACCEPTED with amendments, 2026-10-27)
+
+The v0.2.2 proposal below, as amended in review. Composites gained fields,
+so this became a minor version (additive) instead of a patch.
+
+### Amendments from review
+
+- **R1:** textures are uploaded as non-sRGB formats (`Rgba8Unorm`, never
+  `Rgba8UnormSrgb`), or sampling would silently linearize them. The M4
+  editor viewport uses the same render path and target formats as the CLI.
+- **R2:** exact premultiply formula `(c * a + 127) / 255` in the spec. UV
+  top-left / +v down accepted; each converter owns its flip; an asymmetric
+  texture fixture catches flipped UVs. No mipmaps; small-render aliasing
+  added to Known gaps.
+- **R3:** accepted as proposed.
+- **R4:** destination alpha kept (PROVISIONAL). Additive over transparent
+  pixels gives `C > A`; R8 clamps it. Documented that additive effects
+  outside the silhouette vanish on transparent backgrounds (OBS). Fixture:
+  additive drawable partly over transparency.
+- **R5:** "shape" means the source's CURRENT deformed geometry for the
+  frame. Masks render at output resolution, coverage in canvas space.
+- **R6 (amended):** a composite has its own draw order instead of borrowing
+  its lowest or highest child's. `GroupNode` gains optional
+  `rest.drawOrder`, `blendMode` and `masks`, allowed only when
+  `composite: true` (V2); drawOrder is keyable. Composites sort as one unit
+  in their enclosing scope; their contents sort only among themselves; masks
+  and blend apply to the finished layer. Migration from 0.2.x gives each
+  composite the lowest draw order of its drawables (a migration rule, not
+  the semantics). Removed from Known gaps; composite tint stays.
+- **R7:** full mapping stated (x and y, pixel centers, wgpu's top-left
+  fill rule). Culling only with `culling: true`; fixture with a warp that
+  folds a mesh over itself. Optional AA later added to Known gaps; goldens
+  never use it.
+- **R8:** `rgb > a` clamp and exact un-premultiply rounding written out.
+- **R9 (amended):** offscreen targets (and mask buffers) are allocated per
+  nesting DEPTH and reused across sibling composites. New renderer budget:
+  1 GiB total offscreen memory, checked before allocating. Test: max-depth
+  composites at max output size fail cleanly or fit.
+
+---
+
+## v0.2.2 — rendering semantics (status: SUPERSEDED by v0.3.0 above)
 
 v0.2.1 defines evaluated geometry, opacity, colors and draw order, but not
 how pixels are produced. M2 (`riglet render`, golden images) needs that

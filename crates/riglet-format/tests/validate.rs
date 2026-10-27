@@ -388,3 +388,54 @@ fn huge_declared_buffer_count_is_rejected_before_allocating() {
     drawable(&mut b, "e").mesh.positions.count = u64::MAX / 2;
     expect(&b, "LIMIT_VERTICES");
 }
+
+// ----- v0.3 composite fields -----
+
+#[test]
+fn v2_composite_fields_only_on_composites() {
+    let mut b = valid();
+    b.group("g", "root", 1.0);
+    if let Node::Group(g) = b.node_mut("g") {
+        g.blend_mode = Some(BlendMode::Additive);
+    }
+    expect(&b, "V2_COMPOSITE_FIELD");
+    let mut b = valid();
+    b.group("g", "root", 1.0).set_draw_order("g", 3.0);
+    expect(&b, "V2_COMPOSITE_FIELD");
+}
+
+#[test]
+fn draw_order_keyforms_only_on_composite_groups() {
+    let mut b = valid();
+    b.group("g", "root", 1.0);
+    b.set(
+        "g",
+        &[linear("p", &[0.0, 1.0])],
+        vec![Keyform::default(), Keyform { draw_order: Some(1.0), ..Default::default() }],
+    );
+    expect(&b, "V5_PROPERTY");
+    let mut b = valid();
+    b.composite("c", "root", 1.0, 0.0);
+    b.set(
+        "c",
+        &[linear("p", &[0.0, 1.0])],
+        vec![Keyform::default(), Keyform { draw_order: Some(1.0), ..Default::default() }],
+    );
+    assert_eq!(codes(&b.document()), Vec::<&str>::new());
+}
+
+#[test]
+fn composite_masks_are_checked() {
+    let mut b = valid();
+    b.composite("c", "root", 1.0, 0.0);
+    if let Node::Group(g) = b.node_mut("c") {
+        g.masks = Some(vec![MaskRef { source: "w".into(), mode: MaskMode::Clip }]);
+    }
+    expect(&b, "V3_MASK_SOURCE");
+    let mut b = valid();
+    b.composite("c", "root", 1.0, 0.0);
+    if let Node::Group(g) = b.node_mut("c") {
+        g.masks = Some(vec![MaskRef { source: "e".into(), mode: MaskMode::Clip }]);
+    }
+    assert_eq!(codes(&b.document()), Vec::<&str>::new());
+}
