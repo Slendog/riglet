@@ -1,5 +1,5 @@
 //! Serde types for `manifest.json` and `model.json`, mirroring
-//! `docs/format/riglet-format-v0.2.ts` one to one.
+//! `docs/format/riglet-format-v0.3.ts` one to one.
 //!
 //! These types are the on-disk shape only. They are not validated; use
 //! [`crate::Rig::prepare`] to validate a document and get an evaluable rig.

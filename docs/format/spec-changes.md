@@ -1,7 +1,7 @@
 # Spec change proposals
 
 Each entry is a proposed change to the Riglet project format spec
-(currently `docs/format/riglet-format-v0.2.ts`). Accepted entries are folded
+(currently `docs/format/riglet-format-v0.3.ts`). Accepted entries are folded
 into the next spec version and `schemaVersion` is bumped. The spec file is the
 normative text; entries here record the reasoning.
 

@@ -4,7 +4,7 @@
 //! No GPU, UI or filesystem dependency: everything works from bytes, so
 //! converters, the CLI and the editor share this crate.
 //!
-//! Spec: `docs/format/riglet-format-v0.2.ts`. Rule IDs (E*, V*) in comments
+//! Spec: `docs/format/riglet-format-v0.3.ts`. Rule IDs (E*, V*) in comments
 //! refer to its Evaluation and Validation sections.
 
 pub mod bind;
