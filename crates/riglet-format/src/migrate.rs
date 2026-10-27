@@ -4,8 +4,8 @@
 use serde_json::Value;
 
 pub const FORMAT_NAME: &str = "riglet";
-pub const CURRENT_SCHEMA_VERSION: &str = "0.2.0";
-const CURRENT: Version = Version { major: 0, minor: 2, patch: 0 };
+pub const CURRENT_SCHEMA_VERSION: &str = "0.2.1";
+const CURRENT: Version = Version { major: 0, minor: 2, patch: 1 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MigrateError {
@@ -65,6 +65,11 @@ pub fn migrate(manifest: &mut Value, model: &mut Value) -> Result<String, Migrat
     if version.minor < 2 {
         v0_1_to_v0_2(manifest, model);
     }
+    // Patch versions only clarify rules, so any older version just takes
+    // the current version number.
+    if let Some(obj) = manifest.as_object_mut() {
+        obj.insert("schemaVersion".into(), Value::from(CURRENT_SCHEMA_VERSION));
+    }
     Ok(version_str)
 }
 
@@ -93,10 +98,23 @@ mod tests {
 
     #[test]
     fn current_version_is_unchanged() {
-        let mut manifest = json!({"format": "riglet", "schemaVersion": "0.2.0"});
+        let mut manifest = json!({"format": "riglet", "schemaVersion": CURRENT_SCHEMA_VERSION});
         let before = manifest.clone();
         assert!(migrate(&mut manifest, &mut json!({})).is_ok());
         assert_eq!(manifest, before);
+    }
+
+    #[test]
+    fn older_patch_reads_without_migration() {
+        let mut manifest = json!({"format": "riglet", "schemaVersion": "0.2.0"});
+        assert_eq!(migrate(&mut manifest, &mut json!({})), Ok("0.2.0".to_owned()));
+        assert_eq!(manifest["schemaVersion"], CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn newer_patch_of_current_minor_is_readable() {
+        let mut manifest = json!({"format": "riglet", "schemaVersion": "0.2.9"});
+        assert!(migrate(&mut manifest, &mut json!({})).is_ok());
     }
 
     #[test]

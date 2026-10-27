@@ -7,7 +7,7 @@ normative text; entries here record the reasoning.
 
 ---
 
-## v0.2.1 — clarifications found while implementing M1 (status: PROPOSED)
+## v0.2.1 — clarifications found while implementing M1 (status: ACCEPTED 1–9 with amendments, 2026-10-27; item 10 PROPOSED)
 
 The M1 implementation already follows these. They don't change the data
 format; they settle cases v0.2 doesn't decide. If accepted, I fold them into
@@ -45,6 +45,34 @@ and read unchanged).
    cover keyforms of real Live2D models. The cap is checked before decoding.
 9. **Migration, patch versions.** Files with the same minor version and any
    patch version (0.2.x) are readable without migration.
+10. **PROPOSED — Limits, new cap: mesh-binding pairs = 268 435 456 (2^28).**
+    Sum, over every (child node, mesh deformer) binding, of bound points ×
+    the deformer's triangles. The grid index makes normal meshes fast, but
+    no spatial index has a better worst case than points × triangles when
+    triangles overlap freely (many thin triangles crossing one region, points
+    in the gaps), so only a cap guarantees bounded load time. It is stated
+    on the inputs, not on algorithm work, so it is the same for every
+    reader. At the cap, our worst case binds in about 2 s (release, Apple
+    M-series). Downside: a large well-behaved mesh can also hit it (for
+    example 20 000 triangles × 65 536 points). The code enforces this cap
+    already (`LIMIT_MESH_BINDING`); it is not in the spec text until
+    accepted.
+
+### Amendments from review (v0.2.1)
+
+- **1.** The bound triangle's affine map applies to the child's CURRENT
+  local position each frame, so keyform deltas and extrapolation stay
+  continuous. (Spec E6.)
+- **3.** Exact, not an approximation: a mesh deformer is the identity at
+  rest. (Spec E5.)
+- **5.** Model visibility (exported) is separate from editor visibility,
+  which lives in editor.json only. Whether a hidden drawable still acts as a
+  mask source is PROVISIONAL, decided in M2. (Spec NodeBase, E4.)
+- **6.** Inochi2D allows children under Parts: the M3 importer restructures
+  them without loss, with a round-trip test. (Spec Known gaps.)
+- **7.** Inochi2D textures may be non-PNG: the M3 importer converts them.
+  (Spec Known gaps.)
+- **9.** Versioning policy written into the spec header.
 
 ---
 

@@ -1,5 +1,5 @@
 /**
- * Riglet Project Format — v0.2
+ * Riglet Project Format — v0.2.1
  *
  * Notation: TypeScript types used as a language-neutral spec.
  * The real implementation can be in any language.
@@ -21,7 +21,15 @@
  *
  * Paths inside the package are always relative and "/"-separated.
  *
- * Changes from v0.1: see docs/format/spec-changes.md (v0.2.0).
+ * Changes: see docs/format/spec-changes.md (v0.2.0, v0.2.1).
+ *
+ * Versioning policy (schemaVersion is semver):
+ *   - patch (0.2.x): clarifications only, no new fields. Any 0.2.x reader
+ *     reads any 0.2.x file; no migration.
+ *   - minor (0.x): additive fields. Older readers keep what they don't know
+ *     via `extensions` and unknown-entry preservation. While major is 0, a
+ *     reader rejects a newer minor than its own.
+ *   - major: breaking changes; readers migrate older majors.
  */
 
 export type Id = string;           // stable UUID, never shown to the user
@@ -32,7 +40,7 @@ export type RGB = [number, number, number];
 
 export interface Manifest {
   format: "riglet";                // v0.1 files said "rigproj"; migrated on read
-  schemaVersion: string;           // semver, "0.2.0"; readers migrate older versions
+  schemaVersion: string;           // semver, "0.2.1"; see the versioning policy
   generator: string;               // app name + version that wrote the file
   provenance: Provenance[];        // import history of this model
 }
@@ -135,7 +143,8 @@ interface NodeBase {
   name: string;
   parent: Id | null;
   children: Id[];                  // UI order and tie-break order; must agree with parent
-  visible: boolean;
+  visible: boolean;                // model visibility, exported (E4). Editor-only
+                                   // "hide while I work" state lives in editor.json.
   keyformSets: KeyformSet[];
   extensions?: Extensions;
 }
@@ -313,9 +322,10 @@ export interface CurveKey {
  *     - All properties except drawOrder: multilinear blend of the 2^N
  *       corner keyforms with the per-axis weights.
  *     - drawOrder (PROVISIONAL, to verify against Live2D samples): never
- *       interpolated. Per axis, take the nearest key (ties go to the lower
- *       key) and use that grid point's delta. This avoids flicker when two
- *       drawables cross.
+ *       interpolated. On each linear axis take the nearest key (ties go to
+ *       the lower key); on each step axis take the lower key, as for every
+ *       other property. Use that one grid point's delta. This avoids
+ *       flicker when two drawables cross.
  *
  * E4. Combining.
  *     - value = rest + sum over the node's sets of the set's delta, then
@@ -329,6 +339,9 @@ export interface CurveKey {
  *     - Draw order: drawables sorted ascending by evaluated drawOrder
  *       (higher on top). Ties break by depth-first pre-order position in
  *       the node tree (following `children` order).
+ *     - Visibility: `visible: false` hides the node and its whole subtree.
+ *       PROVISIONAL (decided with mask rendering in M2): whether a hidden
+ *       drawable still acts as a mask source.
  *
  * E5. Rotation deformer. Local unit = 1 model pixel at rest.
  *     Let R(a) = [[cos a, -sin a], [sin a, cos a]] (a in degrees, converted).
@@ -346,17 +359,27 @@ export interface CurveKey {
  *         p' = W(origin) + ds * scale * R(angle + dθ) * p
  *       If |det J0| < 1e-12 or both atan2 arguments of rot(J) are 0, use
  *       dθ = 0 and ds = 1.
- *     - Parent is a mesh deformer: as for a warp, with J and J0 the affine
- *       Jacobians of the triangle bound to origin (E6).
+ *     - Parent is a mesh deformer: as for a warp, with W the affine map of
+ *       the triangle bound to origin (E6) and J its linear part. A mesh
+ *       deformer is the identity map at rest, so J0 = I exactly:
+ *       dθ = rot(J), ds = sqrt(|det J|).
  *
  * E6. Mesh deformer binding. Derived at load, never stored.
- *     - For each child point, find the rest triangle containing it and keep
- *       its barycentric weights. Deformed point = the same weights applied
- *       to the deformed triangle.
- *     - A point on a shared edge or vertex goes to the lowest triangle index.
- *     - A point outside every triangle uses the nearest triangle (Euclidean
- *       distance to the triangle) with unclamped barycentrics (affine
- *       extrapolation). Ties go to the lowest triangle index.
+ *     - Binding fixes one triangle per child point, chosen from the child's
+ *       REST position:
+ *       - the rest triangle containing it; a point on a shared edge or
+ *         vertex goes to the lowest triangle index;
+ *       - else the nearest triangle (Euclidean distance to the triangle);
+ *         ties go to the lowest triangle index.
+ *     - Each frame, the bound triangle's affine map (rest triangle onto
+ *       deformed triangle) is applied to the child's CURRENT local position,
+ *       i.e. after the child's own keyform deltas. Barycentrics are not
+ *       clamped, so points outside the triangle extrapolate affinely. This
+ *       keeps keyform deltas and extrapolation continuous.
+ *     - Points that reach a mesh deformer through other deformers (for
+ *       example drawable -> warp -> mesh deformer) bind using their rest
+ *       positions mapped up the REST chain into the mesh deformer's space.
+ *       Mesh deformers are the identity at rest, so this needs no recursion.
  *     - To verify against Inochi2D MeshGroup in M3. If Inochi2D differs, the
  *       converter emits a warning; this rule does not change silently.
  *
@@ -418,11 +441,16 @@ export interface CurveKey {
  *       group.
  *     - parent and children agree for every node. No node is listed twice.
  *     - No cycles; every node is reachable from root.
+ *     - A drawable has no children (no node space is defined for them; see
+ *       Known gaps).
  * V3. References
  *     - Every Id reference resolves: texture, mask source, ParamAxis
  *       parameter, physics params, motion targets.
  *     - MaskRef.source is a drawable and not the masked drawable itself.
  *     - The mask graph (drawable -> its mask sources) has no cycles.
+ *     - Parameter, texture and motion ids are unique.
+ *     - exportIds keys refer to an existing parameter or node.
+ *     - A texture file exists in the package and is a PNG.
  * V4. Parameters
  *     - min/max/default lengths match kind (1 or 2); min < max; default
  *       within [min, max].
@@ -466,7 +494,10 @@ export interface CurveKey {
  *                                       reject real files)
  *   Nodes                               65 536
  *   Vertices per mesh / warp            65 536
- *   Vertices total                      4 194 304
+ *   Vertices total                      4 194 304 (rest geometry)
+ *   Keyform vertices total              33 554 432 (decoded keyform
+ *                                       positions, checked before decoding:
+ *                                       many keyforms may share bytes)
  *   Keyform grid size per set           65 536 (product of key counts)
  *   Texture width / height              16 384 (checked from the PNG
  *                                       header before decoding)
@@ -481,6 +512,11 @@ export interface CurveKey {
  *   - Multiple textures per Part (albedo, emissive, bump).
  *   - Composite blend mode and tint.
  *   - Cubic interpolation of bindings.
+ *   - Inochi2D allows children under Parts, which V2 rejects. The importer
+ *     restructures them without loss (insert a group, keep transforms),
+ *     with a round-trip test.
+ *   - Inochi2D packages can hold non-PNG textures (e.g. TGA, BC7); the
+ *     importer converts them to PNG.
  * Live2D (M5/M6):
  *   - Rotation deformer reflect X/Y.
  *   - Warp quad vs triangle cell interpolation.

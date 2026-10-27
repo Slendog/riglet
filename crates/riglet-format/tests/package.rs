@@ -88,7 +88,7 @@ fn reads_and_migrates_v0_1() {
     );
     let back = read(&bytes).unwrap();
     assert_eq!(back.manifest.format, "riglet");
-    assert_eq!(back.manifest.schema_version, "0.2.0");
+    assert_eq!(back.manifest.schema_version, riglet_format::migrate::CURRENT_SCHEMA_VERSION);
     assert_eq!(back.model, doc.model);
 }
 

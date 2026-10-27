@@ -204,7 +204,7 @@ impl Builder {
         Document {
             manifest: Manifest {
                 format: "riglet".into(),
-                schema_version: "0.2.0".into(),
+                schema_version: riglet_format::migrate::CURRENT_SCHEMA_VERSION.into(),
                 generator: "riglet-format tests".into(),
                 provenance: Vec::new(),
             },
