@@ -20,7 +20,8 @@ use riglet_fixtures::fixtures;
 use riglet_format::{EvalOutput, Limits, ParamValues, Rig};
 use riglet_render::{Budgets, FrameOptions, Image, RenderError, Renderer, RendererOptions};
 
-/// Golden tolerance, two tiers, measured across six adapters (lavapipe
+/// Golden tolerance, two tiers, on premultiplied values (see
+/// `pixel_diffs`), measured across six adapters (lavapipe
 /// x86_64 and arm64, WARP x86_64 and arm64, Metal on Apple silicon and on
 /// the Intel paravirtual device). With texel-aligned textures every
 /// fixture but one matched the lavapipe reference exactly; the remaining
@@ -84,15 +85,27 @@ fn render_fixture(r: &Renderer, f: &fixtures::Fixture) -> Image {
     riglet_render::render_document(r, &doc, &rig, &out, &FrameOptions::default()).unwrap()
 }
 
-/// Per-pixel largest channel difference.
+/// Per-pixel largest channel difference, compared in PREMULTIPLIED space.
+/// The images are straight alpha (R8), and un-premultiplying amplifies a
+/// one-step GPU rounding difference by 255 / alpha: at alpha 48 (a
+/// half-transparent texture inside two composites) one premultiplied step
+/// became 6 straight steps on the Intel Metal runner. Premultiplied values
+/// weight color error by how visible the pixel is.
 fn pixel_diffs(actual: &Image, golden: &Image) -> Vec<u8> {
+    let premultiplied = |p: &[u8; 4]| {
+        let pre = riglet_render::image::premultiply_channel;
+        [pre(p[0], p[3]), pre(p[1], p[3]), pre(p[2], p[3]), p[3]]
+    };
     actual
         .rgba
         .as_chunks::<4>()
         .0
         .iter()
         .zip(golden.rgba.as_chunks::<4>().0)
-        .map(|(a, g)| a.iter().zip(g).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0))
+        .map(|(a, g)| {
+            let (a, g) = (premultiplied(a), premultiplied(g));
+            a.iter().zip(&g).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0)
+        })
         .collect()
 }
 
@@ -159,6 +172,13 @@ fn tolerance_tiers() {
     let mut hard = base.clone();
     hard[0][1] = 109;
     assert!(compare(&img(&hard), &img(&base)).is_some());
+    // Straight-alpha noise on nearly transparent pixels is not a difference.
+    let faint = vec![[100, 100, 100, 3]; 1000];
+    let mut noisy = faint.clone();
+    for p in noisy.iter_mut().take(100) {
+        p[0] = 180;
+    }
+    assert_eq!(compare(&img(&noisy), &img(&faint)), None);
 }
 
 #[test]

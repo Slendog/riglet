@@ -149,9 +149,10 @@ depends on format + render + converters. Only the editor depends on egui.
   - **Skip allow-list (runners where render tests may skip): empty.** Add
     a runner (`allow_skip: true` in `ci.yml`) only after it is shown to
     have no adapter, with the justification here.
-  - **Tolerance (two tiers, `mod tolerance` in `tests/render.rs`):** every
-    pixel within 8 per channel; at most 0.5% of pixels (minimum 4) beyond
-    2. Measured: texel-aligned fixtures match the reference exactly or
+  - **Tolerance (two tiers, `mod tolerance` in `tests/render.rs`), on
+    premultiplied values:** every pixel within 8 per channel; at most 0.5%
+    of pixels (minimum 4) beyond 2. Premultiplied because un-premultiplying
+    amplifies GPU rounding at low alpha (1 step became 6 at alpha 48). Measured: texel-aligned fixtures match the reference exactly or
     within 2 on all six CI adapters. Fixtures avoid magnified filtered
     textures (those differed by up to 24 between adapters); bilinear
     filtering is covered by `uv_orientation`.
