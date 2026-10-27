@@ -468,7 +468,11 @@ impl Renderer {
             let (clip, invert) = flags(masks);
             let [mr, mg, mb] = d.multiply_color;
             let [sr, sg, sb] = d.screen_color;
-            put(slot, [mr, mg, mb, 1.0, sr, sg, sb, 0.0, d.opacity, clip, invert, 0.0]);
+            let threshold = match rig.nodes.get(d.node).map(|n| &n.kind) {
+                Some(RigKind::Drawable { mask_threshold: Some(t), .. }) => *t,
+                _ => -1.0,
+            };
+            put(slot, [mr, mg, mb, 1.0, sr, sg, sb, 0.0, d.opacity, clip, invert, threshold]);
         }
         for (slot, c) in frame.composites.iter().enumerate() {
             let (clip, invert) = flags(node_masks(rig, c.node));
@@ -757,7 +761,6 @@ impl FrameContext<'_> {
                 continue;
             }
             let mut pass = color_pass(encoder, view, true);
-            pass.set_bind_group(0, &self.model.globals, &[0]);
             pass.set_bind_group(2, self.dummy_group, &[]);
             pass.set_vertex_buffer(0, self.model.vertex_buffer.slice(..));
             pass.set_index_buffer(self.model.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -767,6 +770,8 @@ impl FrameContext<'_> {
                 let Some((texture, culling)) = self.texture_of(source) else { continue };
                 let Some(pipeline) = self.renderer.pipelines.mask.get(usize::from(culling)) else { continue };
                 pass.set_pipeline(pipeline);
+                // The source's own draw uniform carries its threshold (S4).
+                pass.set_bind_group(0, &self.model.globals, &[self.draw_offset(slot)]);
                 pass.set_bind_group(1, texture, &[]);
                 pass.draw_indexed(range, 0, 0..1);
             }

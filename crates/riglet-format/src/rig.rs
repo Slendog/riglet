@@ -13,8 +13,8 @@ use crate::geometry;
 use crate::limits::Limits;
 use crate::migrate::{CURRENT_SCHEMA_VERSION, FORMAT_NAME};
 use crate::model::{
-    AxisInterpolation, BlendMode, BufferRef, CurveInterp, Id, Keyform, KeyformSet, MaskMode, MaskRef, MotionTarget,
-    Node, ParamAxis, ParamKind, Rgb, Vec2,
+    AxisInterpolation, BlendMode, BufferRef, Combine, CurveInterp, Id, Keyform, KeyformSet, MaskMode, MaskRef,
+    MotionTarget, Node, ParamAxis, ParamKind, Rgb, Vec2,
 };
 use crate::package::{Document, check_package_path};
 
@@ -62,6 +62,7 @@ pub struct RigKeyform {
     pub angle: Option<f32>,
     pub origin: Option<Vec2>,
     pub scale: Option<f32>,
+    pub scale_xy: Option<Vec2>,
     pub multiply_color: Option<Rgb>,
     pub screen_color: Option<Rgb>,
 }
@@ -70,6 +71,7 @@ pub struct RigKeyform {
 pub struct RigSet {
     pub axes: Vec<RigAxis>,
     pub keyforms: Vec<RigKeyform>,
+    pub combine: Combine,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -92,6 +94,8 @@ pub enum RigKind {
         draw_order: f32,
         multiply_color: Rgb,
         screen_color: Rgb,
+        /// S4: binary coverage threshold as a mask source.
+        mask_threshold: Option<f32>,
     },
     Warp {
         rows: u32,
@@ -101,7 +105,8 @@ pub enum RigKind {
     Rotation {
         origin: Vec2,
         angle: f32,
-        scale: f32,
+        /// Per axis (S1).
+        scale: Vec2,
     },
     MeshDeformer {
         positions: Vec<Vec2>,
@@ -713,6 +718,12 @@ impl Validator<'_> {
                 let indices = self.indices(&d.mesh.indices, positions.len(), id);
                 // Masks are checked in check_masks once every node is known.
                 let masks = d.masks.iter().filter_map(|m| node_index.get(&m.source).map(|&i| (i, m.mode))).collect();
+                if let Some(t) = d.mask_threshold
+                    && !(t.is_finite() && (0.0..=1.0).contains(&t))
+                {
+                    self.issue("V5_MASK_THRESHOLD", Some(id), "maskThreshold must be finite and in [0, 1]");
+                    ok = false;
+                }
                 match (ok, uvs, indices, texture) {
                     (true, Some(uvs), Some(indices), Some(texture)) => Some(RigKind::Drawable {
                         texture,
@@ -725,6 +736,7 @@ impl Validator<'_> {
                         draw_order: r.draw_order,
                         multiply_color: r.multiply_color,
                         screen_color: r.screen_color,
+                        mask_threshold: d.mask_threshold,
                     }),
                     _ => None,
                 }
@@ -751,11 +763,11 @@ impl Validator<'_> {
             }
             Node::Rotation(r) => {
                 let rest = &r.rest;
-                if !finite(&rest.origin) || !rest.angle.is_finite() || !rest.scale.is_finite() {
+                if !finite(&rest.origin) || !rest.angle.is_finite() || !finite(&rest.scale.xy()) {
                     self.issue("V8_NON_FINITE", Some(id), "rest values are not finite");
                     return None;
                 }
-                Some(RigKind::Rotation { origin: rest.origin, angle: rest.angle, scale: rest.scale })
+                Some(RigKind::Rotation { origin: rest.origin, angle: rest.angle, scale: rest.scale.xy() })
             }
             Node::MeshDeformer(m) => {
                 let positions = self.vec2s(&m.mesh.positions, id, "positions")?;
@@ -841,10 +853,25 @@ impl Validator<'_> {
             return None;
         }
         let mut keyforms = Vec::with_capacity(set.keyforms.len());
+        let combine = set.combine.unwrap_or_default();
         for kf in &set.keyforms {
+            // S2: multiply sets scale opacity, multiplyColor and scale only.
+            let not_multipliable = kf.positions.is_some()
+                || kf.draw_order.is_some()
+                || kf.angle.is_some()
+                || kf.origin.is_some()
+                || kf.screen_color.is_some();
+            if combine == Combine::Multiply && not_multipliable {
+                self.issue(
+                    "V5_COMBINE_PROPERTY",
+                    Some(id),
+                    "a multiply set may only animate opacity, multiplyColor, scale and scaleXY",
+                );
+                return None;
+            }
             keyforms.push(self.build_keyform(kf, id, allowed, rest_count)?);
         }
-        Some(RigSet { axes, keyforms })
+        Some(RigSet { axes, keyforms, combine })
     }
 
     fn build_keyform(
@@ -856,14 +883,19 @@ impl Validator<'_> {
     ) -> Option<RigKeyform> {
         let bad_property = (kf.positions.is_some() && !allowed.positions)
             || (kf.draw_order.is_some() && !allowed.draw_order)
-            || ((kf.angle.is_some() || kf.origin.is_some() || kf.scale.is_some()) && !allowed.rotation)
+            || ((kf.angle.is_some() || kf.origin.is_some() || kf.scale.is_some() || kf.scale_xy.is_some())
+                && !allowed.rotation)
             || ((kf.multiply_color.is_some() || kf.screen_color.is_some()) && !allowed.colors);
         if bad_property {
             self.issue("V5_PROPERTY", Some(id), "keyform animates a property this node type does not have");
             return None;
         }
         let scalars = [kf.opacity, kf.draw_order, kf.angle, kf.scale];
-        let vectors = [kf.origin.as_ref().map(|v| &v[..]), kf.multiply_color.as_ref().map(|v| &v[..])];
+        let vectors = [
+            kf.origin.as_ref().map(|v| &v[..]),
+            kf.multiply_color.as_ref().map(|v| &v[..]),
+            kf.scale_xy.as_ref().map(|v| &v[..]),
+        ];
         if scalars.iter().flatten().any(|v| !v.is_finite())
             || vectors.iter().flatten().any(|v| !finite(v))
             || kf.screen_color.is_some_and(|c| !finite(&c))
@@ -900,6 +932,7 @@ impl Validator<'_> {
             angle: kf.angle,
             origin: kf.origin,
             scale: kf.scale,
+            scale_xy: kf.scale_xy,
             multiply_color: kf.multiply_color,
             screen_color: kf.screen_color,
         })

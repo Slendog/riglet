@@ -606,3 +606,82 @@ fn hidden_composite_is_marked_hidden() {
     assert!(!out.composites[0].visible);
     assert!(!out.drawables[0].visible);
 }
+
+// ---------- v0.4: S1 per-axis scale, S2 multiply sets ----------
+
+#[test]
+fn rotation_with_per_axis_scale_scales_before_rotating() {
+    let mut b = Builder::new();
+    b.param("p", 0.0, 1.0, 0.0);
+    b.rotation("r", "root", [100.0, 0.0], 90.0, 1.0);
+    if let Node::Rotation(r) = b.node_mut("r") {
+        r.rest.scale = riglet_format::model::Scale::PerAxis([2.0, 3.0]);
+    }
+    b.drawable("d", "r", &[[10.0, 0.0], [0.0, 10.0]]);
+    let kfs = vec![Keyform::default(), Keyform { scale_xy: Some([1.0, -1.0]), ..Default::default() }];
+    b.set("r", &[linear("p", &[0.0, 1.0])], kfs);
+    let rig = b.rig();
+    // T * R * S: (10,0) -> (20,0) -> R90 -> (0,20); (0,10) -> (0,30) -> (-30,0).
+    let p = positions(&rig, &eval(&rig, &[]), "d");
+    assert_close(p[0], [100.0, 20.0]);
+    assert_close(p[1], [70.0, 0.0]);
+    // scaleXY delta (+1, -1): scale (3, 2).
+    let p = positions(&rig, &eval(&rig, &[("p", [1.0, 0.0])]), "d");
+    assert_close(p[0], [100.0, 30.0]);
+    assert_close(p[1], [80.0, 0.0]);
+}
+
+#[test]
+fn multiply_sets_scale_the_sum_of_add_sets() {
+    let mut b = Builder::new();
+    b.param("a", 0.0, 1.0, 0.0).param("m", 0.0, 1.0, 0.0).param("n", 0.0, 1.0, 0.0);
+    one_point(&mut b);
+    if let Node::Drawable(d) = b.node_mut("d") {
+        d.rest.opacity = 0.4;
+    }
+    let op = |v: f32| Keyform { opacity: Some(v), ..Default::default() };
+    // add: +0.2 at a = 1. multiply: x0.5 at m = 1, x0.5 at n = 1.
+    b.set("d", &[linear("a", &[0.0, 1.0])], vec![op(0.0), op(0.2)]);
+    b.set_multiply("d", &[linear("m", &[0.0, 1.0])], vec![op(1.0), op(0.5)]);
+    b.set_multiply("d", &[linear("n", &[0.0, 1.0])], vec![Keyform::default(), op(0.5)]);
+    let rig = b.rig();
+    let o = |v: &[(&str, [f32; 2])]| eval(&rig, v).drawables[0].opacity;
+    assert_close_f(o(&[]), 0.4);
+    // (0.4 + 0.2) * 0.5 * 0.5
+    assert_close_f(o(&[("a", [1.0, 0.0]), ("m", [1.0, 0.0]), ("n", [1.0, 0.0])]), 0.15);
+    // Factors interpolate: m = 0.5 -> 0.75; a missing factor counts as 1.
+    assert_close_f(o(&[("m", [0.5, 0.0])]), 0.3);
+}
+
+#[test]
+fn multiply_sets_clamp_after_combining() {
+    let mut b = Builder::new();
+    b.param("m", 0.0, 1.0, 0.0);
+    one_point(&mut b);
+    if let Node::Drawable(d) = b.node_mut("d") {
+        d.rest.opacity = 0.8;
+        d.rest.multiply_color = [0.5, 1.0, 0.2];
+    }
+    let kf = Keyform { opacity: Some(3.0), multiply_color: Some([3.0, 0.5, 2.0]), ..Default::default() };
+    b.set_multiply("d", &[linear("m", &[0.0, 1.0])], vec![Keyform::default(), kf]);
+    let rig = b.rig();
+    let out = eval(&rig, &[("m", [1.0, 0.0])]);
+    assert_close_f(out.drawables[0].opacity, 1.0);
+    let c = out.drawables[0].multiply_color;
+    for (got, want) in c.iter().zip([1.0, 0.5, 0.4]) {
+        assert_close_f(*got, want);
+    }
+}
+
+#[test]
+fn multiply_scale_applies_per_axis() {
+    let mut b = Builder::new();
+    b.param("m", 0.0, 1.0, 0.0);
+    b.rotation("r", "root", [0.0, 0.0], 0.0, 2.0);
+    b.drawable("d", "r", &[[1.0, 1.0]]);
+    let kf = Keyform { scale: Some(2.0), scale_xy: Some([1.0, 0.5]), ..Default::default() };
+    b.set_multiply("r", &[linear("m", &[0.0, 1.0])], vec![Keyform::default(), kf]);
+    let rig = b.rig();
+    // rest 2 x factor 2 x per-axis (1, 0.5) = (4, 2).
+    assert_close(positions(&rig, &eval(&rig, &[("m", [1.0, 0.0])]), "d")[0], [4.0, 2.0]);
+}

@@ -7,6 +7,37 @@ normative text; entries here record the reasoning.
 
 ---
 
+## v0.4.0 — Inochi2D-driven additions (status: ACCEPTED S1, S2, S4, 2026-10-27; blend group (a) PROPOSED)
+
+Additive (minor) changes needed for exact Inochi2D import. Migration from
+0.3.x: none.
+
+- **S1. Non-uniform scale on rotation deformers.** `rest.scale` is a number
+  or `[sx, sy]`; Keyform gains `scaleXY`. E5 applies `R(angle) * diag(sx,
+  sy)`, matching Inochi2D's T * R * S node transform.
+- **S2. Multiply sets.** `KeyformSet.combine: "add" | "multiply"`;
+  multiply sets hold factors for opacity, multiplyColor, scale, scaleXY.
+  E4: `(rest + sum of add deltas) * product of multiply factors`, then
+  clamp. Checked against Inochi2D 0.8.7 (`part/package.d` l.207-281,
+  798-803): each Inochi2D property is purely additive or purely
+  multiplicative, offsets reset per frame, the result is clamped after
+  combining.
+- **S4. Binary mask threshold.** `DrawableNode.maskThreshold`: as a mask
+  source, coverage is 1 where alpha > threshold. Inochi2D discards mask
+  fragments with `alpha <= threshold`.
+- **Known gaps:** Live2D export must merge or approximate S1 and S2 with
+  warnings.
+- **PROPOSED, not yet in the spec: blend modes reproducible with
+  fixed-function blending**, matching Inochi2D's legacy GL path
+  (`core/nodes/common.d`): screen (also Inochi2D's LinearDodge), lighten,
+  colorDodge (legacy), addGlow, subtract, exclusion, inverse,
+  destinationIn, clipToLower, sliceFromLower. Formulas in
+  docs/design/m3-inochi2d.md section 4a. Each would get a golden fixture.
+  Destination-read modes (Overlay, Darken, ColorBurn, HardLight, SoftLight,
+  Difference) stay in Known gaps.
+
+---
+
 ## v0.3.0 — rendering semantics and composite fields (status: ACCEPTED with amendments, 2026-10-27)
 
 The v0.2.2 proposal below, as amended in review. Composites gained fields,

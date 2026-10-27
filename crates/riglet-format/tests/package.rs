@@ -107,7 +107,7 @@ fn rejects_missing_or_bad_json() {
 fn rejects_newer_schema() {
     let doc = sample();
     let mut manifest = serde_json::to_value(&doc.manifest).unwrap();
-    manifest["schemaVersion"] = "0.4.0".into();
+    manifest["schemaVersion"] = "0.5.0".into();
     let manifest = serde_json::to_vec(&manifest).unwrap();
     let model = serde_json::to_vec(&doc.model).unwrap();
     let r = read(&raw_zip(&[("manifest.json", &manifest), ("model.json", &model)], true));

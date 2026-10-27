@@ -1,5 +1,5 @@
 /**
- * Riglet Project Format — v0.3.0
+ * Riglet Project Format — v0.4.0
  *
  * Notation: TypeScript types used as a language-neutral spec.
  * The real implementation can be in any language.
@@ -21,7 +21,7 @@
  *
  * Paths inside the package are always relative and "/"-separated.
  *
- * Changes: see docs/format/spec-changes.md (v0.2.0, v0.2.1, v0.3.0).
+ * Changes: see docs/format/spec-changes.md (v0.2.0 to v0.4.0).
  *
  * Versioning policy (schemaVersion is semver):
  *   - patch (0.2.x): clarifications only, no new fields. Any 0.2.x reader
@@ -30,6 +30,8 @@
  *     via `extensions` and unknown-entry preservation. While major is 0, a
  *     reader rejects a newer minor than its own.
  *   - major: breaking changes; readers migrate older majors.
+ *
+ * Migration 0.3.x -> 0.4.0: none (only optional fields were added).
  *
  * Migration 0.2.x -> 0.3.0: each composite group gets rest.drawOrder = the
  * lowest rest.drawOrder of the drawables in its subtree (0 if it has none),
@@ -45,7 +47,7 @@ export type RGB = [number, number, number];
 
 export interface Manifest {
   format: "riglet";                // v0.1 files said "rigproj"; migrated on read
-  schemaVersion: string;           // semver, "0.3.0"; see the versioning policy
+  schemaVersion: string;           // semver, "0.4.0"; see the versioning policy
   generator: string;               // app name + version that wrote the file
   provenance: Provenance[];        // import history of this model
 }
@@ -177,6 +179,10 @@ export interface DrawableNode extends NodeBase {
   blendMode: "normal" | "additive" | "multiply";
   culling: boolean;
   masks: MaskRef[];
+  // S4: when this drawable is a MASK SOURCE, its coverage is binary: 1
+  // where texture alpha > maskThreshold, else 0 (R5). Absent = soft
+  // coverage. In [0, 1]. Not keyable.
+  maskThreshold?: number;
   rest: {
     opacity: number;
     drawOrder: number;             // higher draws on top
@@ -199,7 +205,7 @@ export interface RotationDeformerNode extends NodeBase {
   rest: {
     origin: Vec2;                  // parent space
     angle: number;                 // degrees, positive = clockwise on screen
-    scale: number;
+    scale: number | Vec2;          // uniform, or [sx, sy] (S1; local frame, before rotation)
     opacity: number;
   };
 }
@@ -234,6 +240,10 @@ export interface MeshDeformerNode extends NodeBase {
 export interface KeyformSet {
   axes: KeyAxis[];                 // at least one; no ParamAxis twice
   keyforms: Keyform[];             // row-major over axes, axis 0 varies fastest
+  // S2: "add" (default): keyforms hold deltas from rest. "multiply":
+  // keyforms hold FACTORS (missing = 1), for opacity, multiplyColor, scale
+  // and scaleXY only (V5). See E4.
+  combine?: "add" | "multiply";
 }
 
 export interface KeyAxis {
@@ -242,15 +252,17 @@ export interface KeyAxis {
   interpolation: "linear" | "step";
 }
 
-/** Only the properties present are animated; missing = zero delta.
- *  A property must be valid for the node type it belongs to. */
+/** Only the properties present are animated; missing = zero delta (or
+ *  factor 1 in a multiply set). A property must be valid for the node type
+ *  it belongs to. */
 export interface Keyform {
   positions?: BufferRef;           // drawable vertices / warp / mesh-deformer points
   opacity?: number;
   drawOrder?: number;              // drawables, and composite groups
   angle?: number;                  // rotation deformers, degrees
   origin?: Vec2;                   // rotation deformers
-  scale?: number;                  // rotation deformers
+  scale?: number;                  // rotation deformers, applies to both axes
+  scaleXY?: Vec2;                  // rotation deformers, per axis (S1)
   multiplyColor?: RGB;             // drawables
   screenColor?: RGB;               // drawables
 }
@@ -339,11 +351,17 @@ export interface CurveKey {
  *       flicker when two drawables cross.
  *
  * E4. Combining.
- *     - value = rest + sum over the node's sets of the set's delta, then
- *       clamped:
+ *     - value = (rest + sum of the deltas of the node's "add" sets)
+ *               * product of the factors of its "multiply" sets (S2),
+ *       then clamped:
  *         opacity, multiplyColor, screenColor (each channel)   [0, 1]
- *         scale                                                 >= 1e-6
+ *         scale (each axis)                                     >= 1e-6
  *         angle, origin, positions, drawOrder                   unclamped
+ *       Inside a multiply set, factors interpolate like deltas (E3).
+ *     - Scale per axis: sx = rest_x + scale delta + scaleXY delta x (and
+ *       likewise y), where a uniform rest scale s counts as [s, s]; then
+ *       the multiply factors (scale applies to both axes, scaleXY per
+ *       axis).
  *     - Effective opacity = own opacity × parent's effective opacity, for
  *       every node type (groups and deformers included).
  *     - multiplyColor / screenColor apply per drawable; no inheritance.
@@ -361,7 +379,8 @@ export interface CurveKey {
  *
  * E5. Rotation deformer. Local unit = 1 model pixel at rest.
  *     Let R(a) = [[cos a, -sin a], [sin a, cos a]] (a in degrees, converted).
- *     - Parent is a group/root:  p' = origin + scale * R(angle) * p.
+ *     Let S = diag(sx, sy) (E4; uniform scale gives sx = sy).
+ *     - Parent is a group/root:  p' = origin + R(angle) * S * p.
  *     - Parent is a rotation deformer: same formula, then the parent's map.
  *     - Parent is a warp (PROVISIONAL, to verify against Live2D sample
  *       renders by black-box comparison only):
@@ -372,7 +391,7 @@ export interface CurveKey {
  *                  rotation closest to M, so shear is removed)
  *         dθ = rot(J) - rot(J0), converted to degrees
  *         ds = sqrt(|det J| / |det J0|)
- *         p' = W(origin) + ds * scale * R(angle + dθ) * p
+ *         p' = W(origin) + ds * R(angle + dθ) * S * p
  *       If |det J0| < 1e-12 or both atan2 arguments of rot(J) are 0, use
  *       dθ = 0 and ds = 1.
  *     - Parent is a mesh deformer: as for a warp, with W the affine map of
@@ -503,6 +522,9 @@ export interface CurveKey {
  *       a drawable (R2, R7). It ignores the source's opacity (PROVISIONAL),
  *       multiplyColor, screenColor, blend mode, visibility and own masks.
  *       A hidden source still masks (PROVISIONAL).
+ *     - If the source has maskThreshold t (S4): k = 1 where At > t, else
+ *       0 (binary, per fragment, after filtering). This applies whether the
+ *       source is used as a clip or an invert mask.
  *     - Combining: clip = 1 - product over clip sources of (1 - k_i);
  *       invert = 1 - product over invert sources of (1 - k_j);
  *       m = (clip, or 1 if there is no clip source)
@@ -591,6 +613,10 @@ export interface CurveKey {
  *     - Every axis has >= 1 keys, strictly ascending and finite.
  *     - keyforms.length == product of the axes' key counts.
  *     - Keyform properties are valid for the node type.
+ *     - combine "multiply" sets animate only opacity, multiplyColor, scale
+ *       and scaleXY; their factors are finite.
+ *     - Rotation scale (number or both entries) is finite.
+ *     - maskThreshold, when present, is finite and in [0, 1].
  *     - A keyform positions buffer has the same element count as the node's
  *       rest buffer (drawable positions, warp points, mesh-deformer
  *       positions).
@@ -686,9 +712,13 @@ export interface CurveKey {
  *   - A transform on every node (Parts too); relative, cumulative zSort.
  *   - Multiple textures per Part (albedo, emissive, bump).
  *   - Composite tint (multiply/screen color on the layer).
- *   - Inochi2D's per-drawable mask alpha threshold (R5 masks are soft):
- *     the importer keeps it in extensions and warns.
- *   - Cubic interpolation of bindings.
+ *   - Inochi2D blend modes that need destination reads in the shader
+ *     (Overlay, Darken, ColorBurn, HardLight, SoftLight, Difference):
+ *     imported as normal with a warning. (Fixed-function ones: proposed for
+ *     v0.4.x, spec-changes.md.)
+ *   - Inochi2D screens premultiplied color with an extra alpha factor
+ *     (`t + S*a - t*S*a`); converted exactly only for opaque texels.
+ *   - Cubic interpolation of bindings (resampled on import).
  *   - Inochi2D allows children under Parts, which V2 rejects. The importer
  *     restructures them without loss (insert a group, keep transforms),
  *     with a round-trip test.
@@ -700,6 +730,10 @@ export interface CurveKey {
  *   - No anti-aliasing (R7): the renderer will likely want an optional AA
  *     mode later. Golden images are always rendered without it.
  * Live2D (M5/M6):
+ *   - Export must merge or approximate S1 non-uniform scale (Live2D
+ *     rotation deformers scale uniformly) and S2 multiply sets (Live2D
+ *     keyforms are absolute values per grid point; a product of sets
+ *     becomes a merged grid, exact at grid points only), with warnings.
  *   - Rotation deformer reflect X/Y.
  *   - Warp quad vs triangle cell interpolation.
  *   - Expressions (exp3: Add/Multiply/Overwrite) as their own type.

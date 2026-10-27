@@ -11,7 +11,9 @@ struct Frame {
 struct Draw {
     multiply: vec4<f32>,
     screen: vec4<f32>,
-    // x: opacity, y: 1 if a clip mask applies, z: 1 if an invert mask applies.
+    // x: opacity, y: 1 if a clip mask applies, z: 1 if an invert mask applies,
+    // w: this drawable's mask threshold when it is a mask source (S4), or
+    // -1 for soft coverage.
     params: vec4<f32>,
 };
 
@@ -60,12 +62,17 @@ fn fs_drawable(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(p2 * o, t.a * o);
 }
 
-// R5: coverage is the source's texture alpha over its geometry. Union is
-// done by the blend state: dst = src + dst * (1 - src).
+// R5: coverage is the source's texture alpha over its geometry; with a
+// mask threshold (S4) it is 1 where alpha > threshold, else 0. Union is done
+// by the blend state: dst = src + dst * (1 - src).
 @fragment
 fn fs_mask(in: VsOut) -> @location(0) vec4<f32> {
-    let t = textureSample(tex, samp, in.uv);
-    return vec4<f32>(t.a, 0.0, 0.0, t.a);
+    let a = textureSample(tex, samp, in.uv).a;
+    var k = a;
+    if draw.params.w >= 0.0 {
+        k = select(0.0, 1.0, a > draw.params.w);
+    }
+    return vec4<f32>(k, 0.0, 0.0, k);
 }
 
 // R6: a finished composite layer, one texel per output pixel.

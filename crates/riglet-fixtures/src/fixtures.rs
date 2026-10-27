@@ -97,6 +97,32 @@ pub fn all() -> Vec<Fixture> {
         out.push(fixture("mask_multiple", b));
     }
 
+    // S4: binary mask thresholds. The mask source has two hard alpha levels
+    // (0.3 left half, 0.8 right half, texel-aligned so filtering can't
+    // move the boundary); threshold 0.5 keeps only the right half. The
+    // soft version shows both levels for comparison.
+    {
+        let mut levels = Vec::new();
+        for x in 0..32u32 {
+            let a = if x < 16 { 77 } else { 204 };
+            levels.extend_from_slice(&[255, 255, 255, a]);
+        }
+        for (name, mode, threshold) in [
+            ("mask_soft_levels", MaskMode::Clip, None),
+            ("mask_threshold_clip", MaskMode::Clip, Some(0.5)),
+            ("mask_threshold_invert", MaskMode::Invert, Some(0.5)),
+        ] {
+            let mut b = base();
+            b.texture("levels", 32, 1, &levels, false);
+            b.quad("shape", "root", "levels", [-16.0, -10.0], [16.0, 10.0]);
+            b.node_mut("shape").base_mut().visible = false;
+            b.drawable_mut("shape").mask_threshold = threshold;
+            b.quad("art", "root", "red", [-22.0, -6.0], [22.0, 6.0]).set_draw_order("art", 1.0);
+            b.drawable_mut("art").masks.push(MaskRef { source: "shape".into(), mode });
+            out.push(fixture(name, b));
+        }
+    }
+
     // R6: a masked composite with its own blend mode. Its two overlapping
     // half-transparent children must not show a seam: the layer opacity is
     // applied once.

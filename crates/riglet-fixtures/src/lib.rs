@@ -205,6 +205,7 @@ impl Builder {
             blend_mode: BlendMode::Normal,
             culling: false,
             masks: Vec::new(),
+            mask_threshold: None,
             rest: DrawableRest { opacity: 1.0, draw_order: 0.0, multiply_color: [1.0; 3], screen_color: [0.0; 3] },
         }));
         self
@@ -245,6 +246,7 @@ impl Builder {
             blend_mode: BlendMode::Normal,
             culling: false,
             masks: Vec::new(),
+            mask_threshold: None,
             rest: DrawableRest { opacity: 1.0, draw_order: 0.0, multiply_color: [1.0; 3], screen_color: [0.0; 3] },
         }));
         self
@@ -264,7 +266,7 @@ impl Builder {
     pub fn rotation(&mut self, id: &str, parent: &str, origin: Vec2, angle: f32, scale: f32) -> &mut Self {
         self.insert(Node::Rotation(RotationDeformerNode {
             base: base(id, parent),
-            rest: RotationRest { origin, angle, scale, opacity: 1.0 },
+            rest: RotationRest { origin, angle, scale: scale.into(), opacity: 1.0 },
         }));
         self
     }
@@ -277,6 +279,15 @@ impl Builder {
             mesh: DeformerMesh { positions: pos, indices: idx },
             rest: OpacityRest { opacity: 1.0 },
         }));
+        self
+    }
+
+    /// Adds a multiply set (S2): keyforms hold factors.
+    pub fn set_multiply(&mut self, node: &str, axes: &[AxisSpec], keyforms: Vec<Keyform>) -> &mut Self {
+        self.set(node, axes, keyforms);
+        if let Some(set) = self.node_mut(node).base_mut().keyform_sets.last_mut() {
+            set.combine = Some(Combine::Multiply);
+        }
         self
     }
 
@@ -293,7 +304,7 @@ impl Builder {
                 interpolation,
             })
             .collect();
-        self.node_mut(node).base_mut().keyform_sets.push(KeyformSet { axes, keyforms });
+        self.node_mut(node).base_mut().keyform_sets.push(KeyformSet { axes, keyforms, combine: None });
         self
     }
 

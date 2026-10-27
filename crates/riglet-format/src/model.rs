@@ -298,6 +298,9 @@ pub struct DrawableNode {
     pub blend_mode: BlendMode,
     pub culling: bool,
     pub masks: Vec<MaskRef>,
+    /// S4: binary coverage threshold when used as a mask source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_threshold: Option<f32>,
     pub rest: DrawableRest,
 }
 
@@ -356,8 +359,31 @@ pub struct RotationDeformerNode {
 pub struct RotationRest {
     pub origin: Vec2,
     pub angle: f32,
-    pub scale: f32,
+    pub scale: Scale,
     pub opacity: f32,
+}
+
+/// Rotation-deformer scale: uniform, or per axis (S1).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Scale {
+    Uniform(f32),
+    PerAxis(Vec2),
+}
+
+impl Scale {
+    pub fn xy(self) -> Vec2 {
+        match self {
+            Scale::Uniform(s) => [s, s],
+            Scale::PerAxis(v) => v,
+        }
+    }
+}
+
+impl From<f32> for Scale {
+    fn from(s: f32) -> Self {
+        Scale::Uniform(s)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -380,6 +406,20 @@ pub struct DeformerMesh {
 pub struct KeyformSet {
     pub axes: Vec<KeyAxis>,
     pub keyforms: Vec<Keyform>,
+    /// S2; `None` means add.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combine: Option<Combine>,
+}
+
+/// How a keyform set combines with rest and other sets (S2, E4).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Combine {
+    /// Keyforms hold deltas from rest.
+    #[default]
+    Add,
+    /// Keyforms hold factors (missing = 1).
+    Multiply,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -415,6 +455,9 @@ pub struct Keyform {
     pub multiply_color: Option<Rgb>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_color: Option<Rgb>,
+    /// Rotation deformers, per axis (S1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_xy: Option<Vec2>,
 }
 
 // ---------- Physics ----------

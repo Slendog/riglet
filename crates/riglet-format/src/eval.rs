@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::bind::TriangleGrid;
 use crate::geometry::{self, Mat2};
-use crate::model::{AxisInterpolation, Rgb, Vec2};
+use crate::model::{AxisInterpolation, Combine, Rgb, Vec2};
 use crate::rig::{Rig, RigKind, RigNode, RigParam, RigSet};
 
 /// Mesh-deformer bindings (E6): `(node, mesh deformer)` -> bound triangle
@@ -186,8 +186,9 @@ fn axis_position(keys: &[f32], v: f32, interpolation: AxisInterpolation) -> (usi
     }
 }
 
-/// Sum of keyform deltas for one node.
-#[derive(Debug, Clone, Default)]
+/// Sum of keyform deltas ("add" sets) and product of factors ("multiply"
+/// sets, S2) for one node.
+#[derive(Debug, Clone)]
 struct Accum {
     positions: Vec<Vec2>,
     opacity: f32,
@@ -195,12 +196,36 @@ struct Accum {
     angle: f32,
     origin: Vec2,
     scale: f32,
+    scale_xy: Vec2,
     multiply_color: Rgb,
     screen_color: Rgb,
+    opacity_factor: f32,
+    scale_factor: Vec2,
+    multiply_color_factor: Rgb,
+}
+
+impl Default for Accum {
+    fn default() -> Self {
+        Accum {
+            positions: Vec::new(),
+            opacity: 0.0,
+            draw_order: 0.0,
+            angle: 0.0,
+            origin: [0.0; 2],
+            scale: 0.0,
+            scale_xy: [0.0; 2],
+            multiply_color: [0.0; 3],
+            screen_color: [0.0; 3],
+            opacity_factor: 1.0,
+            scale_factor: [1.0; 2],
+            multiply_color_factor: [1.0; 3],
+        }
+    }
 }
 
 impl Accum {
-    /// Zeroes every delta, keeping the positions buffer's capacity.
+    /// Zeroes every delta and resets every factor to 1, keeping the
+    /// positions buffer's capacity.
     fn reset(&mut self, point_count: usize) {
         let positions = std::mem::take(&mut self.positions);
         *self = Accum { positions, ..Default::default() };
@@ -218,7 +243,11 @@ fn add_scaled<const N: usize>(acc: &mut [f32; N], delta: Option<[f32; N]>, w: f3
 }
 
 /// E3: multilinear blend inside one set (draw order: nearest grid point).
+/// "add" sets add their interpolated deltas; "multiply" sets multiply in
+/// their interpolated factors, a missing property counting as 1 (S2).
 fn eval_set(set: &RigSet, values: &[[f32; 2]], acc: &mut Accum) {
+    let multiply = set.combine == Combine::Multiply;
+    let (mut opacity_f, mut scale_f, mut scale_xy_f, mut color_f) = (0.0f32, 0.0f32, [0.0f32; 2], [0.0f32; 3]);
     let mut base = 0usize;
     let mut stride = 1usize;
     let mut nearest = 0usize;
@@ -250,6 +279,13 @@ fn eval_set(set: &RigSet, values: &[[f32; 2]], acc: &mut Accum) {
             continue;
         }
         let Some(kf) = set.keyforms.get(index) else { continue };
+        if multiply {
+            opacity_f += kf.opacity.unwrap_or(1.0) * w;
+            scale_f += kf.scale.unwrap_or(1.0) * w;
+            add_scaled(&mut scale_xy_f, Some(kf.scale_xy.unwrap_or([1.0; 2])), w);
+            add_scaled(&mut color_f, Some(kf.multiply_color.unwrap_or([1.0; 3])), w);
+            continue;
+        }
         if let Some(p) = &kf.positions {
             for (a, d) in acc.positions.iter_mut().zip(p) {
                 a[0] += d[0] * w;
@@ -259,9 +295,20 @@ fn eval_set(set: &RigSet, values: &[[f32; 2]], acc: &mut Accum) {
         acc.opacity += kf.opacity.unwrap_or(0.0) * w;
         acc.angle += kf.angle.unwrap_or(0.0) * w;
         acc.scale += kf.scale.unwrap_or(0.0) * w;
+        add_scaled(&mut acc.scale_xy, kf.scale_xy, w);
         add_scaled(&mut acc.origin, kf.origin, w);
         add_scaled(&mut acc.multiply_color, kf.multiply_color, w);
         add_scaled(&mut acc.screen_color, kf.screen_color, w);
+    }
+    if multiply {
+        acc.opacity_factor *= opacity_f;
+        for (a, (f, xy)) in acc.scale_factor.iter_mut().zip(std::iter::repeat(scale_f).zip(scale_xy_f)) {
+            *a *= f * xy;
+        }
+        for (a, f) in acc.multiply_color_factor.iter_mut().zip(color_f) {
+            *a *= f;
+        }
+        return;
     }
     if let Some(kf) = set.keyforms.get(nearest) {
         acc.draw_order += kf.draw_order.unwrap_or(0.0);
@@ -274,7 +321,8 @@ pub(crate) struct DeformerState {
     points: Vec<Vec2>,
     origin: Vec2,
     angle: f32,
-    scale: f32,
+    /// Per axis (S1).
+    scale: Vec2,
 }
 
 fn rest_state(node: &RigNode) -> DeformerState {
@@ -418,9 +466,11 @@ fn map_up(
                     }
                     _ => (cur.origin, 0.0, 1.0, dn.owner),
                 };
-                let s = cur.scale * d_scale;
+                // E5: origin + ds * R(angle + dθ) * diag(sx, sy) * p.
+                let [sx, sy] = cur.scale;
                 for p in pts.iter_mut() {
-                    *p = geometry::add(base, geometry::scale(geometry::rotate(*p, cur.angle + d_angle), s));
+                    let scaled = [p[0] * sx, p[1] * sy];
+                    *p = geometry::add(base, geometry::scale(geometry::rotate(scaled, cur.angle + d_angle), d_scale));
                 }
                 owner = next;
             }
@@ -502,7 +552,7 @@ impl Rig {
                 let o = if parent_is_composite { 1.0 } else { opacity.get(p).copied().unwrap_or(1.0) };
                 (o, visible.get(p).copied().unwrap_or(true))
             });
-            let own_opacity = (node.opacity + accum.opacity).clamp(0.0, 1.0);
+            let own_opacity = ((node.opacity + accum.opacity) * accum.opacity_factor).clamp(0.0, 1.0);
             opacity.push(own_opacity * parent_opacity);
             visible.push(node.visible && parent_visible);
 
@@ -510,7 +560,13 @@ impl Rig {
             state.points.extend(rest_state.points.iter().zip(&accum.positions).map(|(r, d)| geometry::add(*r, *d)));
             state.origin = geometry::add(rest_state.origin, accum.origin);
             state.angle = rest_state.angle + accum.angle;
-            state.scale = (rest_state.scale + accum.scale).max(MIN_SCALE);
+            // E4/S1/S2: per axis (rest + scale + scaleXY) * factors.
+            for (k, out) in state.scale.iter_mut().enumerate() {
+                let rest = rest_state.scale.get(k).copied().unwrap_or(1.0);
+                let delta = accum.scale + accum.scale_xy.get(k).copied().unwrap_or(0.0);
+                let factor = accum.scale_factor.get(k).copied().unwrap_or(1.0);
+                *out = ((rest + delta) * factor).max(MIN_SCALE);
+            }
 
             if let RigKind::Drawable { draw_order, multiply_color, screen_color, .. } = &node.kind {
                 let clamp3 = |mut rest: Rgb, d: Rgb| {
@@ -521,7 +577,12 @@ impl Rig {
                 };
                 if let Some(frame) = out.drawables.get_mut(slot) {
                     frame.draw_order = draw_order + accum.draw_order;
-                    frame.multiply_color = clamp3(*multiply_color, accum.multiply_color);
+                    let mut multiply = accum.multiply_color;
+                    for ((m, f), r) in multiply.iter_mut().zip(accum.multiply_color_factor).zip(multiply_color) {
+                        // (rest + delta) * factor; clamp3 adds rest back.
+                        *m = (r + *m) * f - r;
+                    }
+                    frame.multiply_color = clamp3(*multiply_color, multiply);
                     frame.screen_color = clamp3(*screen_color, accum.screen_color);
                 }
                 slot += 1;

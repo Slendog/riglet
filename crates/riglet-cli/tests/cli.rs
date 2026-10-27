@@ -77,7 +77,8 @@ fn info_text_and_json() {
     let out = riglet(&["info", &file]);
     assert_eq!(code(&out), 0, "{}", text(&out.stderr));
     let stdout = text(&out.stdout);
-    assert!(stdout.contains("format:      riglet 0.3.0"), "{stdout}");
+    let format_line = format!("format:      riglet {}", riglet_format::migrate::CURRENT_SCHEMA_VERSION);
+    assert!(stdout.contains(&format_line), "{stdout}");
     assert!(stdout.contains("canvas:      32 x 24"));
     assert!(stdout.contains("valid:       yes"));
 

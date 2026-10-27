@@ -250,7 +250,11 @@ fn v5_property_must_fit_node_type() {
 #[test]
 fn v5_set_needs_axes() {
     let mut b = valid();
-    b.node_mut("e").base_mut().keyform_sets.push(KeyformSet { axes: Vec::new(), keyforms: vec![Keyform::default()] });
+    b.node_mut("e").base_mut().keyform_sets.push(KeyformSet {
+        axes: Vec::new(),
+        keyforms: vec![Keyform::default()],
+        combine: None,
+    });
     expect(&b, "V5_NO_AXES");
 }
 
@@ -438,4 +442,42 @@ fn composite_masks_are_checked() {
         g.masks = Some(vec![MaskRef { source: "e".into(), mode: MaskMode::Clip }]);
     }
     assert_eq!(codes(&b.document()), Vec::<&str>::new());
+}
+
+// ----- v0.4 -----
+
+#[test]
+fn v5_multiply_sets_only_animate_multipliable_properties() {
+    let mut b = valid();
+    let set = first_set(&mut b);
+    set.combine = Some(Combine::Multiply);
+    // `d`'s set animates positions: not allowed in a multiply set.
+    expect(&b, "V5_COMBINE_PROPERTY");
+    let mut b = valid();
+    let kfs = vec![Keyform::default(), Keyform { opacity: Some(0.5), ..Default::default() }];
+    b.set_multiply("e", &[linear("p", &[0.0, 1.0])], kfs);
+    assert_eq!(codes(&b.document()), Vec::<&str>::new());
+}
+
+#[test]
+fn v5_mask_threshold_range() {
+    for (t, ok) in [(0.0, true), (0.5, true), (1.0, true), (-0.1, false), (1.5, false), (f32::NAN, false)] {
+        let mut b = valid();
+        drawable(&mut b, "e").mask_threshold = Some(t);
+        let got = codes(&b.document());
+        assert_eq!(got.is_empty(), ok, "threshold {t}: {got:?}");
+        if !ok {
+            assert!(got.contains(&"V5_MASK_THRESHOLD"), "{got:?}");
+        }
+    }
+}
+
+#[test]
+fn v8_non_finite_rotation_scale() {
+    let mut b = valid();
+    b.rotation("r", "root", [0.0, 0.0], 0.0, 1.0);
+    if let Node::Rotation(r) = b.node_mut("r") {
+        r.rest.scale = Scale::PerAxis([1.0, f32::INFINITY]);
+    }
+    expect(&b, "V8_NON_FINITE");
 }
