@@ -457,9 +457,21 @@ impl Importer<'_> {
             let visible = flag(v, "enabled", true);
             let acc = acc + num(v, "zsort").unwrap_or(0.0);
             let id = node_id(uuid);
+            // Where the node sits in the Inochi2D tree, for export: the
+            // Riglet tree can differ (holder groups, MeshGroup reach).
+            let mut place = Map::new();
             if let Some(p) = parent_uuid.and_then(|p| self.mapped.get_mut(&p)) {
+                place.insert("parentUUID".into(), Value::from(parent_uuid));
+                place.insert("childIndex".into(), Value::from(p.children.len()));
                 p.children.push(uuid);
             }
+            let ext_node = || {
+                let mut e = ext_copy(v);
+                if let Some(m) = e.as_object_mut() {
+                    m.extend(place.clone());
+                }
+                e
+            };
 
             let known = ["Node", "Tmp", "Part", "Mask", "Composite", "MeshGroup", "SimplePhysics", "Camera"];
             if !known.contains(&ty.as_str()) {
@@ -653,7 +665,7 @@ impl Importer<'_> {
                         None => frame.clone(),
                     };
                     let mut cbase = base(&cid, &name, Some(&parent), visible);
-                    set_ext(&mut cbase, ext_copy(v));
+                    set_ext(&mut cbase, ext_node());
                     self.insert(Node::Group(GroupNode {
                         base: cbase,
                         composite: true,
@@ -731,7 +743,7 @@ impl Importer<'_> {
             if m.composite.is_none()
                 && let Some(n) = self.nodes.get_mut(&outer)
             {
-                set_ext(n.base_mut(), ext_copy(v));
+                set_ext(n.base_mut(), ext_node());
             }
             self.mapped.insert(uuid, m);
             // Push children in reverse so they pop in file order.

@@ -487,6 +487,10 @@ fn mesh_groups_stop_at_plain_nodes() {
     assert_close(positions(&rig, &out, 4)[0], [18.0, 9.0]);
     assert_close(positions(&rig, &out, 6)[0], [9.0, 9.0]);
     assert!(!codes(&i).contains(&"MESHGROUP_TRANSLATE_APPROXIMATED"));
+    // The Inochi2D place is recorded for export (the Riglet parent differs).
+    let ext = i.document.model.nodes["inochi:5"].base().extensions.as_ref().unwrap();
+    assert_eq!(ext["inochi2d"]["parentUUID"], 7);
+    assert_eq!(ext["inochi2d"]["childIndex"], 0);
 }
 
 #[test]

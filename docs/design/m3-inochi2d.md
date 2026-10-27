@@ -322,6 +322,31 @@ dropped delta (in pixels or units), so a rigger can see whether it matters.
 Alternative: a least-squares additive fit (smaller average error, but not
 exact anywhere in particular). I recommend the default-anchored split.
 
+### 5a. Export: undoing the importer's restructuring (added after the import review)
+
+The importer does not map nodes 1:1, so export first groups Riglet nodes
+back into Inochi2D nodes and only then writes them. Every artifact is
+marked by its id suffix or by `extensions.inochi2d`:
+
+| Riglet artifact | Export |
+|---|---|
+| `inochi:U` (group / drawable / mesh deformer / composite) | Inochi2D node U, its raw fields restored from `extensions.inochi2d` |
+| `inochi:U:transform` (rotation) | the transform of node U (merged, not a separate Node) |
+| `inochi:U:part` drawable + `inochi:U` holder group | one Part U whose children are the holder's other children |
+| `inochi:U:mesh` | MeshGroup U's mesh (U had a transform) |
+| `inochi:U:bake` (static rotation for baked ancestors) | dropped: it equals the static transforms of U's Inochi2D ancestors, which export writes again |
+| `...:rigid` twins (`twinOf`) | dropped: blocked nodes return to their Inochi2D parent |
+| any node | placed under `parentUUID` at `childIndex` (recorded on import), not under its Riglet parent |
+| vertices and deform deltas under a MeshGroup | un-baked: mapped back through the inverse of the static Inochi2D transforms between the MeshGroup and the node (what the importer baked) |
+| Riglet nodes without `inochi:` ids (native models) | new nodes with fresh uuids, mapped by the table above |
+
+Data the importer converted (tint/screen order, multiplicative sets, x/y
+rotations as scales, cubic axes) is converted back with the inverse
+formulas; the warnings the importer emitted are not repeated, new losses
+get their own codes. The S7 decision changes two rows: with "pointwise"
+and "translate", rotation deformers under mesh deformers map back to Part
+and plain-node transforms exactly instead of approximately.
+
 ## 6. Spec changes this needs (proposed v0.4.0, minor, additive)
 
 Without them, the rows marked "or exact with S..." stay approximations.
