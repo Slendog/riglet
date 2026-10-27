@@ -67,11 +67,24 @@ impl Default for Budgets {
     }
 }
 
+/// Which device limits to request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DeviceLimits {
+    /// Everything the adapter supports.
+    #[default]
+    Adapter,
+    /// wgpu's WebGL2 downlevel defaults (2048 px textures, 256-byte uniform
+    /// alignment): what a browser build will get. Lets tests exercise those
+    /// limits on any adapter.
+    WebGl2,
+}
+
 /// How to pick the GPU adapter.
 #[derive(Debug, Clone, Default)]
 pub struct RendererOptions {
     /// Prefer a software adapter (lavapipe, WARP, ...).
     pub force_software: bool,
+    pub limits: DeviceLimits,
     pub budgets: Budgets,
 }
 
@@ -173,12 +186,15 @@ impl Renderer {
             .await
             .map_err(|e| RenderError::NoAdapter(e.to_string()))?;
         let info = adapter.get_info();
-        let limits = adapter.limits();
+        let required_limits = match options.limits {
+            DeviceLimits::Adapter => adapter.limits(),
+            DeviceLimits::WebGl2 => wgpu::Limits::downlevel_webgl2_defaults(),
+        };
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("riglet"),
                 required_features: wgpu::Features::empty(),
-                required_limits: limits.clone(),
+                required_limits,
                 ..Default::default()
             })
             .await

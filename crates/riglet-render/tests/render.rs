@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use riglet_fixtures::fixtures;
 use riglet_format::{EvalOutput, Limits, ParamValues, Rig};
-use riglet_render::{Budgets, FrameOptions, Image, RenderError, Renderer, RendererOptions};
+use riglet_render::{Budgets, DeviceLimits, FrameOptions, Image, RenderError, Renderer, RendererOptions};
 
 /// Golden tolerance, two tiers, on premultiplied values (see
 /// `pixel_diffs`), measured across six adapters (lavapipe
@@ -40,12 +40,32 @@ mod tolerance {
     pub const SOFT_MIN_PIXELS: usize = 4;
 }
 
+fn env(k: &str) -> Option<String> {
+    std::env::var(k).ok().filter(|v| !v.is_empty())
+}
+
+/// Device limits for the render tests: `RIGLET_DEVICE_LIMITS=webgl2` runs
+/// everything under wgpu's WebGL2 downlevel limits (the GL CI job).
+fn device_limits() -> DeviceLimits {
+    match env("RIGLET_DEVICE_LIMITS").as_deref() {
+        Some("webgl2") => DeviceLimits::WebGl2,
+        Some(other) if other != "adapter" => panic!("unknown RIGLET_DEVICE_LIMITS `{other}`"),
+        _ => DeviceLimits::Adapter,
+    }
+}
+
 fn renderer() -> Option<Renderer> {
-    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
-    match Renderer::new(RendererOptions::default()) {
+    renderer_with(device_limits())
+}
+
+fn renderer_with(limits: DeviceLimits) -> Option<Renderer> {
+    match Renderer::new(RendererOptions { limits, ..Default::default() }) {
         Ok(r) => {
             let a = r.adapter();
-            eprintln!("render tests: adapter `{}` ({}, {}, {})", a.name, a.backend, a.device_type, a.driver);
+            eprintln!(
+                "render tests: adapter `{}` ({}, {}, {}) limits {:?}, max texture {}",
+                a.name, a.backend, a.device_type, a.driver, limits, a.max_texture_dimension
+            );
             if let Some(want) = env("RIGLET_EXPECT_BACKEND") {
                 assert_eq!(a.backend, want, "expected backend {want}, got {} (`{}`)", a.backend, a.name);
             }
@@ -299,4 +319,42 @@ fn budgets_fail_cleanly_before_allocating() {
     }
     assert!(matches!(render(&tiny, 1e6), Err(RenderError::OutputSize { .. })));
     assert!(matches!(render(&tiny, 1e-6), Err(RenderError::OutputSize { .. })));
+}
+
+/// The WebGL2 limits a browser build gets, enforced for real: 2048 px max
+/// texture size for model textures and for the output.
+#[test]
+fn webgl2_limits_are_enforced() {
+    let Some(r) = renderer_with(DeviceLimits::WebGl2) else { return };
+    assert_eq!(r.adapter().max_texture_dimension, 2048);
+    assert_eq!(r.adapter().uniform_offset_alignment, 256);
+
+    // A 4096 px wide texture: rejected from the PNG header, before decoding.
+    let mut b = riglet_fixtures::Builder::new();
+    b.model.canvas = riglet_format::model::Canvas { width: 64.0, height: 64.0 };
+    b.texture("wide", 4096, 1, &riglet_fixtures::solid(4096, 1, [255, 0, 0, 255]), false);
+    b.quad("q", "root", "wide", [-8.0, -8.0], [8.0, 8.0]);
+    let doc = b.document();
+    let rig = Rig::prepare(&doc, &Limits::default()).unwrap();
+    match r.upload(&doc, &rig) {
+        Err(RenderError::TextureTooLarge { width: 4096, max: 2048, .. }) => {}
+        Err(e) => panic!("expected TextureTooLarge, got {e}"),
+        Ok(_) => panic!("expected TextureTooLarge, got Ok"),
+    }
+
+    // Output: 2048 px is fine, 2049 is over the device limit.
+    let mut b = riglet_fixtures::Builder::new();
+    b.model.canvas = riglet_format::model::Canvas { width: 1.0, height: 1.0 };
+    b.quad("q", "root", "tex", [-0.5, -0.5], [0.5, 0.5]);
+    let doc = b.document();
+    let rig = Rig::prepare(&doc, &Limits::default()).unwrap();
+    let mut out = EvalOutput::new();
+    rig.evaluate(&ParamValues::defaults(&rig), &mut out);
+    let model = r.upload(&doc, &rig).unwrap();
+    let frame = |scale: f32| FrameOptions { scale, background: None };
+    assert!(r.render(&model, &rig, (1.0, 1.0), &out, &frame(2048.0)).is_ok());
+    assert!(matches!(
+        r.render(&model, &rig, (1.0, 1.0), &out, &frame(2049.0)),
+        Err(RenderError::OutputSize { max: 2048, .. })
+    ));
 }

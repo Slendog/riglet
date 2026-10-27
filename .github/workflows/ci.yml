@@ -12,7 +12,7 @@ env:
 
 jobs:
   test:
-    name: test (${{ matrix.os }})
+    name: test (${{ matrix.label }})
     strategy:
       fail-fast: false
       matrix:
@@ -25,18 +25,24 @@ jobs:
         # (including a silent fallback to GL) fails. allow_skip: render
         # tests may skip for lack of an adapter. The allow-list is EMPTY;
         # an entry needs a justification in CLAUDE.md.
+        #
+        # The gl entry renders through Mesa's GL (llvmpipe via EGL) with
+        # wgpu's WebGL2 downlevel limits, so the GL backend and the 2048 px
+        # texture limit a browser build gets are exercised for real.
         include:
-          - { os: ubuntu-24.04, backend: Vulkan, adapter: llvmpipe, allow_skip: false }
-          - { os: ubuntu-24.04-arm, backend: Vulkan, adapter: llvmpipe, allow_skip: false }
-          - { os: macos-latest, backend: Metal, adapter: "", allow_skip: false }
-          - { os: macos-15-intel, backend: Metal, adapter: "", allow_skip: false }
-          - { os: windows-latest, backend: Dx12, adapter: Microsoft Basic Render Driver, allow_skip: false }
-          - { os: windows-11-arm, backend: Dx12, adapter: Microsoft Basic Render Driver, allow_skip: false }
+          - { label: ubuntu-24.04, os: ubuntu-24.04, wgpu_backend: vulkan, backend: Vulkan, adapter: llvmpipe, limits: adapter, allow_skip: false }
+          - { label: ubuntu-24.04-gl-webgl2, os: ubuntu-24.04, wgpu_backend: gl, backend: Gl, adapter: llvmpipe, limits: webgl2, allow_skip: false }
+          - { label: ubuntu-24.04-arm, os: ubuntu-24.04-arm, wgpu_backend: vulkan, backend: Vulkan, adapter: llvmpipe, limits: adapter, allow_skip: false }
+          - { label: macos-latest, os: macos-latest, wgpu_backend: "", backend: Metal, adapter: "", limits: adapter, allow_skip: false }
+          - { label: macos-15-intel, os: macos-15-intel, wgpu_backend: "", backend: Metal, adapter: "", limits: adapter, allow_skip: false }
+          - { label: windows-latest, os: windows-latest, wgpu_backend: "", backend: Dx12, adapter: Microsoft Basic Render Driver, limits: adapter, allow_skip: false }
+          - { label: windows-11-arm, os: windows-11-arm, wgpu_backend: "", backend: Dx12, adapter: Microsoft Basic Render Driver, limits: adapter, allow_skip: false }
     runs-on: ${{ matrix.os }}
     env:
       RIGLET_REQUIRE_GPU: ${{ matrix.allow_skip && '0' || '1' }}
       RIGLET_EXPECT_BACKEND: ${{ matrix.backend }}
       RIGLET_EXPECT_ADAPTER: ${{ matrix.adapter }}
+      RIGLET_DEVICE_LIMITS: ${{ matrix.limits }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # rustup is preinstalled on every hosted runner; with no arguments it
@@ -44,18 +50,18 @@ jobs:
       - run: rustup toolchain install
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Install lavapipe
+      - name: Install Mesa (lavapipe, llvmpipe GL/EGL)
         if: startsWith(matrix.os, 'ubuntu')
-        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers
+        run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers libegl1 libegl-mesa0 libgl1-mesa-dri libgles2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
         shell: bash
         run: |
           set -o pipefail
-          # Linux renders on lavapipe (the reference). Elsewhere WGPU_BACKEND
-          # stays UNSET: an empty value means "no backends" to wgpu.
-          if [[ "${{ matrix.os }}" == ubuntu* ]]; then export WGPU_BACKEND=vulkan; fi
+          # WGPU_BACKEND only where the matrix names one (vulkan, gl);
+          # elsewhere it stays UNSET: an empty value means "no backends".
+          if [ -n "${{ matrix.wgpu_backend }}" ]; then export WGPU_BACKEND="${{ matrix.wgpu_backend }}"; fi
           cargo test --workspace -- --nocapture 2>&1 | tee tests.log
       # Worst-case mesh-deformer binding must be rejected fast in release.
       - run: cargo test --release -p riglet-format --test binding -- --ignored
@@ -65,13 +71,13 @@ jobs:
         run: |
           line=$(grep -v 'cli render tests' tests.log 2>/dev/null | grep -m1 -E 'render tests: (adapter|SKIPPED)' || echo 'render tests: did not run')
           cli=$(grep -c 'cli render tests: SKIPPED' tests.log 2>/dev/null || true)
-          echo "${{ matrix.os }}: ${line#*render tests: } (expected ${{ matrix.backend }} ${{ matrix.adapter }}; CLI render tests skipped: ${cli:-0})"
-          echo "- **${{ matrix.os }}**: ${line#*render tests: } (expected ${{ matrix.backend }} ${{ matrix.adapter }}; CLI render tests skipped: ${cli:-0})" >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ matrix.label }}: ${line#*render tests: } (expected ${{ matrix.backend }} ${{ matrix.adapter }}; CLI render tests skipped: ${cli:-0})"
+          echo "- **${{ matrix.label }}**: ${line#*render tests: } (expected ${{ matrix.backend }} ${{ matrix.adapter }}; CLI render tests skipped: ${cli:-0})" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload golden mismatches
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: render-failures-${{ matrix.os }}
+          name: render-failures-${{ matrix.label }}
           path: target/tmp/render-failures/
           if-no-files-found: ignore
 
