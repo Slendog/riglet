@@ -51,7 +51,8 @@ fn grid_matches_reference_on_random_soups() {
             (0..400).map(|_| [rng.range(-3.0 * scale, 3.0 * scale), rng.range(-3.0 * scale, 3.0 * scale)]).collect();
         // Vertices and edge midpoints exercise the shared-edge rule.
         queries.extend(points.iter().take(60));
-        queries.extend(points.chunks_exact(2).take(60).map(|c| [(c[0][0] + c[1][0]) / 2.0, (c[0][1] + c[1][1]) / 2.0]));
+        queries
+            .extend(points.as_chunks::<2>().0.iter().take(60).map(|[a, b]| [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0]));
         check_equivalent(&points, &indices, &queries);
     }
 }
@@ -132,9 +133,9 @@ fn needle_rig(needles: usize, points: usize) -> Builder {
 }
 
 #[test]
-fn adversarial_binding_over_the_cap_is_rejected_quickly() {
+fn adversarial_binding_is_rejected_quickly() {
     // 21 845 needles (65 535 vertices, the per-mesh limit) and 65 536 child
-    // points: 1.4e9 pairs, far above the default cap.
+    // points: the grid cannot help, so the work budget must stop it.
     let b = needle_rig(21_845, 65_536);
     let doc = b.document();
     let start = Instant::now();
@@ -144,38 +145,33 @@ fn adversarial_binding_over_the_cap_is_rejected_quickly() {
     assert!(elapsed < Duration::from_secs(5), "rejection took {elapsed:?}");
 }
 
-/// Times binding of the needle rig at `needles` x `points` pairs.
-fn time_needles(needles: usize, points: usize) -> Duration {
-    let b = needle_rig(needles, points);
-    let doc = b.document();
-    let start = Instant::now();
-    let rig = Rig::prepare(&doc, &Limits::default());
-    let elapsed = start.elapsed();
-    assert!(rig.is_ok(), "{:?}", rig.err());
-    elapsed
-}
-
 #[test]
-fn adversarial_binding_below_the_cap_finishes_in_budget() {
-    // Debug builds are slow, so this runs a scaled-down worst case
-    // (4 194 304 pairs). The full-cap case runs in release in CI (below).
-    let elapsed = time_needles(2048, 2048);
-    assert!(elapsed < Duration::from_secs(20), "binding took {elapsed:?}");
+fn adversarial_binding_below_the_budget_loads() {
+    // 2048 x 2048 needles: about 2^23 work, well inside the budget.
+    let b = needle_rig(2048, 2048);
+    let start = Instant::now();
+    let rig = Rig::prepare(&b.document(), &Limits::default()).unwrap();
+    let elapsed = start.elapsed();
+    assert!(rig.binding_work() < Limits::default().binding_work_budget);
+    assert!(elapsed < Duration::from_secs(5), "binding took {elapsed:?}");
 }
 
-/// Worst case at the default cap (2^28 pairs). Run with
-/// `cargo test --release --test binding -- --ignored`.
+/// Release timing of the full-size rejection:
+/// `cargo test --release --test binding -- --ignored --nocapture`.
 #[test]
 #[ignore = "release only: cargo test --release --test binding -- --ignored"]
-fn adversarial_binding_at_the_cap_finishes_in_budget() {
-    let elapsed = time_needles(16_384, 16_384);
-    eprintln!("binding at the cap took {elapsed:?}");
-    assert!(elapsed < Duration::from_secs(30), "binding took {elapsed:?}");
+fn adversarial_binding_rejection_time_in_release() {
+    let doc = needle_rig(21_845, 65_536).document();
+    let start = Instant::now();
+    let issues = validate(&doc, &Limits::default());
+    let elapsed = start.elapsed();
+    eprintln!("rejection at the default budget took {elapsed:?}");
+    assert!(issues.iter().any(|i| i.code == "LIMIT_MESH_BINDING"));
+    assert!(elapsed < Duration::from_secs(5), "rejection took {elapsed:?}");
 }
 
-#[test]
-fn regular_mesh_binding_is_fast() {
-    // A realistic large case: 20 000 triangles, 65 536 child points.
+/// A large, well-behaved mesh: 20 000 triangles, 65 536 child points.
+fn regular_rig() -> Builder {
     let mut b = Builder::new();
     let n = 100usize;
     let mut pos = Vec::new();
@@ -193,12 +189,60 @@ fn regular_mesh_binding_is_fast() {
         }
     }
     b.mesh_deformer("m", "root", &pos, &idx);
-    let child: Vec<[f32; 2]> = (0..65_536).map(|i| [(i % 256) as f32 * 1.95, (i / 256) as f32 * 1.95]).collect();
+    // Mostly inside, plus a band outside the mesh (x up to ~550 > 500).
+    let child: Vec<[f32; 2]> = (0..65_536).map(|i| [(i % 256) as f32 * 2.15, (i / 256) as f32 * 1.95]).collect();
     b.drawable("d", "m", &child);
-    let doc = b.document();
-    let limits = Limits { max_mesh_binding_pairs: u64::MAX, ..Limits::default() };
+    b
+}
+
+#[test]
+fn large_well_behaved_mesh_loads_with_default_limits() {
+    let doc = regular_rig().document();
     let start = Instant::now();
-    assert!(Rig::prepare(&doc, &limits).is_ok());
+    let rig = Rig::prepare(&doc, &Limits::default());
     let elapsed = start.elapsed();
+    let rig = rig.unwrap_or_else(|issues| panic!("{issues:?}"));
+    eprintln!("binding work {} in {elapsed:?}", rig.binding_work());
+    assert!(rig.binding_work() < Limits::default().binding_work_budget / 16);
     assert!(elapsed < Duration::from_secs(10), "binding took {elapsed:?}");
+}
+
+/// Small mesh built with exact arithmetic only (no sin/cos), so the input
+/// is bit-identical on every platform.
+fn determinism_rig() -> Builder {
+    let mut b = Builder::new();
+    let n = 12usize;
+    let mut pos = Vec::new();
+    for y in 0..=n {
+        for x in 0..=n {
+            // Skew rows so cells hold different triangle counts.
+            pos.push([x as f32 * 4.0 + y as f32 * 0.5, y as f32 * 3.0]);
+        }
+    }
+    let mut idx = Vec::new();
+    for y in 0..n {
+        for x in 0..n {
+            let i = (y * (n + 1) + x) as u16;
+            let s = n as u16 + 1;
+            idx.extend([i, i + 1, i + s, i + 1, i + s + 1, i + s]);
+        }
+    }
+    b.mesh_deformer("m", "root", &pos, &idx);
+    let child: Vec<[f32; 2]> =
+        (0..500).map(|i| [(i * 37 % 101) as f32 * 0.75 - 10.0, (i * 53 % 89) as f32 * 0.5 - 5.0]).collect();
+    b.drawable("d", "m", &child);
+    b
+}
+
+/// Golden binding work for `determinism_rig`. CI checks it on every
+/// platform; if the grid changes on purpose, update it in the same commit.
+const DETERMINISM_GOLDEN_WORK: u64 = 6095;
+
+#[test]
+fn binding_work_is_deterministic() {
+    let doc = determinism_rig().document();
+    let a = Rig::prepare(&doc, &Limits::default()).unwrap().binding_work();
+    let b = Rig::prepare(&doc, &Limits::default()).unwrap().binding_work();
+    assert_eq!(a, b);
+    assert_eq!(a, DETERMINISM_GOLDEN_WORK, "binding work changed: {a}");
 }

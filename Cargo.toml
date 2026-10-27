@@ -6,7 +6,7 @@ members = ["crates/riglet-format"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-rust-version = "1.85"
+rust-version = "1.99"
 
 [workspace.dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
@@ -21,3 +21,9 @@ unsafe_code = "forbid"
 unwrap_used = "warn"
 expect_used = "warn"
 indexing_slicing = "warn"
+
+# The evaluator and binding run on every load and frame. Optimize the format
+# library even in dev builds (debug assertions stay on), so debug editors and
+# tests see realistic load times.
+[profile.dev.package.riglet-format]
+opt-level = 2

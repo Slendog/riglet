@@ -7,7 +7,7 @@ normative text; entries here record the reasoning.
 
 ---
 
-## v0.2.1 — clarifications found while implementing M1 (status: ACCEPTED 1–9 with amendments, 2026-10-27; item 10 PROPOSED)
+## v0.2.1 — clarifications found while implementing M1 (status: ACCEPTED 1–9 with amendments, 2026-10-27; item 10 REJECTED, replaced)
 
 The M1 implementation already follows these. They don't change the data
 format; they settle cases v0.2 doesn't decide. If accepted, I fold them into
@@ -45,7 +45,7 @@ and read unchanged).
    cover keyforms of real Live2D models. The cap is checked before decoding.
 9. **Migration, patch versions.** Files with the same minor version and any
    patch version (0.2.x) are readable without migration.
-10. **PROPOSED — Limits, new cap: mesh-binding pairs = 268 435 456 (2^28).**
+10. **REJECTED — Limits, new cap: mesh-binding pairs = 268 435 456 (2^28).**
     Sum, over every (child node, mesh deformer) binding, of bound points ×
     the deformer's triangles. The grid index makes normal meshes fast, but
     no spatial index has a better worst case than points × triangles when
@@ -57,6 +57,13 @@ and read unchanged).
     example 20 000 triangles × 65 536 points). The code enforces this cap
     already (`LIMIT_MESH_BINDING`); it is not in the spec text until
     accepted.
+
+    **Review outcome:** rejected, because it refuses big but well-behaved
+    meshes that the grid binds cheaply. Replaced by a deterministic WORK
+    budget (counted candidate tests and grid cells visited, 2^28), which is
+    not a format rule: the spec gains a "Loader resource limits" section
+    saying readers may refuse files that exceed their own budgets, with
+    Riglet's budget documented there as implementation-defined.
 
 ### Amendments from review (v0.2.1)
 

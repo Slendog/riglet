@@ -3,8 +3,10 @@
 //! must return exactly the same triangle for every point.
 //!
 //! Worst-case cost is still points × triangles (for example, many thin
-//! triangles crossing one region that holds no point), so callers cap that
-//! product separately (`Limits::max_mesh_binding_pairs`).
+//! triangles crossing one region that holds no point). The grid counts its
+//! work (candidate triangle tests plus grid cells visited) so callers can
+//! stop at a budget (`Limits::binding_work_budget`). The count depends only
+//! on the input, never on timing or platform.
 
 use crate::geometry::{self, add, dot, scale, sub};
 use crate::model::Vec2;
@@ -103,6 +105,7 @@ pub struct TriangleGrid {
     /// Per-triangle query stamp, to visit each triangle once per query.
     stamps: Vec<u32>,
     query: u32,
+    work: u64,
 }
 
 impl TriangleGrid {
@@ -127,6 +130,7 @@ impl TriangleGrid {
             entries: Vec::new(),
             stamps: vec![0; count],
             query: 0,
+            work: 0,
         };
         loop {
             grid.set_resolution(cells);
@@ -220,6 +224,38 @@ impl TriangleGrid {
         Aabb { min, max: [min[0] + self.cell_size[0], min[1] + self.cell_size[1]] }
     }
 
+    /// Work done by all [`TriangleGrid::bind`] calls so far: candidate
+    /// triangle tests plus grid cells visited. Deterministic for a given
+    /// mesh and query sequence.
+    pub fn work(&self) -> u64 {
+        self.work
+    }
+
+    /// Distance from `p` to the grid cells at Chebyshev ring `ring` or
+    /// farther from cell `(cx, cy)`: those cells lie in at most four
+    /// rectangles (left, right, top, bottom of the inner square). `None`
+    /// when no such cell exists.
+    fn ring_lower_bound(&self, cx: usize, cy: usize, ring: usize, p: Vec2) -> Option<f32> {
+        let n = self.cells;
+        let x = |i: usize| self.bounds.min[0] + i as f32 * self.cell_size[0];
+        let y = |j: usize| self.bounds.min[1] + j as f32 * self.cell_size[1];
+        let rect = |x0: usize, x1: usize, y0: usize, y1: usize| Aabb { min: [x(x0), y(y0)], max: [x(x1), y(y1)] };
+        let mut regions = Vec::with_capacity(4);
+        if cx + ring < n {
+            regions.push(rect(cx + ring, n, 0, n));
+        }
+        if cx >= ring {
+            regions.push(rect(0, cx + 1 - ring, 0, n));
+        }
+        if cy + ring < n {
+            regions.push(rect(0, n, cy + ring, n));
+        }
+        if cy >= ring {
+            regions.push(rect(0, n, 0, cy + 1 - ring));
+        }
+        regions.iter().map(|r| r.distance_sq(p).sqrt()).reduce(f32::min)
+    }
+
     /// Same result as [`bind_point_brute`].
     pub fn bind(&mut self, p: Vec2) -> u32 {
         if self.triangles.is_empty() {
@@ -230,13 +266,21 @@ impl TriangleGrid {
         // Containment: the lowest-index containing triangle overlaps p's
         // cell, and cell lists are in ascending index order.
         if self.bounds.contains(p) {
+            let mut tests = 0u64;
+            let mut found = None;
             for &tri in self.cell(cx, cy) {
+                tests += 1;
                 let (Some(&t), Some(b)) = (self.triangles.get(tri as usize), self.boxes.get(tri as usize)) else {
                     continue;
                 };
                 if contains(t, b, p) == Some(true) {
-                    return tri;
+                    found = Some(tri);
+                    break;
                 }
+            }
+            self.work = self.work.saturating_add(tests);
+            if let Some(tri) = found {
+                return tri;
             }
         }
 
@@ -248,15 +292,14 @@ impl TriangleGrid {
             self.query = 1;
         }
         let mut best = (u32::MAX, f32::INFINITY);
-        let min_cell = self.cell_size[0].min(self.cell_size[1]);
-        let outside = self.bounds.distance_sq(p).sqrt();
         for ring in 0..self.cells {
-            let lower = outside.max(ring.saturating_sub(1) as f32 * min_cell);
+            let Some(lower) = self.ring_lower_bound(cx, cy, ring, p) else { break };
             // Small margin so float error never prunes a true tie.
             if best.0 != u32::MAX && lower * (1.0 - 1e-4) > best.1.sqrt() {
                 break;
             }
             for (x, y) in ring_cells(cx, cy, ring, self.cells) {
+                self.work = self.work.saturating_add(1);
                 if best.0 != u32::MAX && self.cell_box(x, y).distance_sq(p) * (1.0 - 1e-4) > best.1 {
                     continue;
                 }
@@ -276,6 +319,7 @@ impl TriangleGrid {
                 continue;
             }
             *stamp = self.query;
+            self.work = self.work.saturating_add(1);
             let Some(&t) = self.triangles.get(tri as usize) else { continue };
             if geometry::barycentric(t, p).is_none() {
                 continue;

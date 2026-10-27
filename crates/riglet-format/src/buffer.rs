@@ -32,7 +32,7 @@ fn slice<'a>(files: &'a BTreeMap<String, Vec<u8>>, r: &BufferRef, max_count: u64
         return Err(BufferError::TooLarge { count: r.count, limit: max_count });
     }
     let size = r.element_type.size();
-    if r.byte_offset % size != 0 {
+    if !r.byte_offset.is_multiple_of(size) {
         return Err(BufferError::Misaligned { offset: r.byte_offset, align: size });
     }
     let oob = || BufferError::OutOfBounds { file: r.file.clone() };
@@ -53,10 +53,8 @@ pub fn read_vec2(files: &BTreeMap<String, Vec<u8>>, r: &BufferRef, max_count: u6
     }
     let bytes = slice(files, r, max_count)?;
     let mut out = Vec::with_capacity(bytes.len() / 8);
-    for chunk in bytes.chunks_exact(8) {
-        let (x, y) = chunk.split_at(4);
-        let read = |b: &[u8]| <[u8; 4]>::try_from(b).map_or(f32::NAN, f32::from_le_bytes);
-        let p = [read(x), read(y)];
+    for &[x0, x1, x2, x3, y0, y1, y2, y3] in bytes.as_chunks::<8>().0 {
+        let p = [f32::from_le_bytes([x0, x1, x2, x3]), f32::from_le_bytes([y0, y1, y2, y3])];
         if !p[0].is_finite() || !p[1].is_finite() {
             return Err(BufferError::NonFinite);
         }
@@ -73,10 +71,8 @@ pub fn read_indices(files: &BTreeMap<String, Vec<u8>>, r: &BufferRef, max_count:
     }
     let bytes = slice(files, r, max_count)?;
     Ok(match r.element_type {
-        ElementType::U16 => {
-            bytes.chunks_exact(2).map(|c| <[u8; 2]>::try_from(c).map_or(0, u16::from_le_bytes).into()).collect()
-        }
-        _ => bytes.chunks_exact(4).map(|c| <[u8; 4]>::try_from(c).map_or(0, u32::from_le_bytes)).collect(),
+        ElementType::U16 => bytes.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c).into()).collect(),
+        _ => bytes.as_chunks::<4>().0.iter().map(|&c| u32::from_le_bytes(c)).collect(),
     })
 }
 
@@ -95,7 +91,7 @@ impl BufferWriter {
     }
 
     fn align4(&mut self) {
-        while self.data.len() % 4 != 0 {
+        while !self.data.len().is_multiple_of(4) {
             self.data.push(0);
         }
     }

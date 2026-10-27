@@ -1,7 +1,9 @@
-//! Resource caps for untrusted input (spec "Limits").
+//! Caps for untrusted input: format limits (spec "Limits") and this
+//! loader's resource budgets (spec "Loader resource limits").
 
-/// Reader caps. [`Limits::default`] holds the spec defaults; a file within
-/// them must load in every conforming reader.
+/// Reader caps. Every field except `binding_work_budget` is a format limit
+/// with its spec default: a file within them must load in every conforming
+/// reader. `binding_work_budget` is an implementation-defined loader budget.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Limits {
     pub zip_max_entries: u64,
@@ -17,9 +19,11 @@ pub struct Limits {
     pub max_keyform_vertices_total: u64,
     pub max_keyform_grid: u64,
     pub max_texture_dimension: u32,
-    /// Sum over mesh-deformer bindings of bound points × triangles. Caps
-    /// load time against adversarial meshes (proposed for spec v0.2.1).
-    pub max_mesh_binding_pairs: u64,
+    /// Loader resource budget, not a format rule: maximum mesh-deformer
+    /// binding work (candidate triangle tests plus grid cells visited, see
+    /// [`crate::bind::TriangleGrid::work`]). Exceeding it fails with
+    /// `LIMIT_MESH_BINDING`. 2^28 is about 2 s in release.
+    pub binding_work_budget: u64,
 }
 
 const MIB: u64 = 1024 * 1024;
@@ -38,7 +42,7 @@ impl Default for Limits {
             max_keyform_vertices_total: 33_554_432,
             max_keyform_grid: 65_536,
             max_texture_dimension: 16_384,
-            max_mesh_binding_pairs: 1 << 28,
+            binding_work_budget: 1 << 28,
         }
     }
 }

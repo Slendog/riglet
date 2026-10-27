@@ -503,6 +503,28 @@ export interface CurveKey {
  *                                       header before decoding)
  *
  * =====================================================================
+ * LOADER RESOURCE LIMITS (implementation-defined, not format rules)
+ * =====================================================================
+ * The Validation and Limits sections above decide whether a file is valid.
+ * Separately, an implementation may refuse a valid file whose processing
+ * exceeds its own resource budgets (time, memory, work). Such a refusal is
+ * not a validity verdict: the same file may load in another reader, or in
+ * the same reader with a larger budget. Budgets must be deterministic for a
+ * given file (counted work, never wall-clock time), so a file loads or fails
+ * the same way on every platform.
+ *
+ * Riglet's budgets (documentation only; other readers choose their own):
+ *   Mesh-deformer binding work           2^28 units (one unit = one
+ *                                       candidate point-vs-triangle test
+ *                                       or one grid cell visited by
+ *                                       Riglet's binding index); about 2 s
+ *                                       in release on current hardware.
+ *                                       Issue code LIMIT_MESH_BINDING.
+ *
+ * Every other LIMIT_* check measures file contents (counts and sizes), so
+ * those are format limits (see Limits), not loader budgets.
+ *
+ * =====================================================================
  * KNOWN GAPS (tracked; resolved by future spec versions)
  * =====================================================================
  * Inochi2D (M3):

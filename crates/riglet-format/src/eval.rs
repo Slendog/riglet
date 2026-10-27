@@ -251,15 +251,20 @@ enum BindMode<'a, 'g> {
 }
 
 /// Builds bindings at load, with one triangle grid per mesh deformer and a
-/// cap on total binding work (points × triangles).
+/// budget on total binding work (see [`TriangleGrid::work`]).
 struct Binder<'g> {
     bindings: Bindings,
     grids: HashMap<usize, TriangleGrid>,
     rest: &'g [DeformerState],
     nodes: &'g [RigNode],
-    work: u64,
-    cap: u64,
+    budget: u64,
     exceeded: bool,
+}
+
+impl Binder<'_> {
+    fn total_work(&self) -> u64 {
+        self.grids.values().map(TriangleGrid::work).fold(0, u64::saturating_add)
+    }
 }
 
 impl<'a> BindMode<'a, '_> {
@@ -273,15 +278,21 @@ impl<'a> BindMode<'a, '_> {
             BindMode::Compute(binder) => {
                 let mesh = key.1;
                 let RigKind::MeshDeformer { indices, .. } = &binder.nodes.get(mesh)?.kind else { return None };
-                let triangles = (indices.len() / 3) as u64;
-                binder.work = binder.work.saturating_add((pts.len() as u64).saturating_mul(triangles));
-                if binder.work > binder.cap {
-                    binder.exceeded = true;
-                    return None;
-                }
                 let rest = binder.rest.get(mesh).map_or(&[][..], |s| s.points.as_slice());
+                let mut used = binder.total_work();
                 let grid = binder.grids.entry(mesh).or_insert_with(|| TriangleGrid::new(rest, indices));
-                let tris: Vec<u32> = pts.iter().map(|&p| grid.bind(p)).collect();
+                let mut tris = Vec::with_capacity(pts.len());
+                for &p in pts {
+                    let before = grid.work();
+                    tris.push(grid.bind(p));
+                    used = used.saturating_add(grid.work() - before);
+                    // Checked per point: one query costs at most a few
+                    // passes over one mesh, so overshoot stays small.
+                    if used > binder.budget {
+                        binder.exceeded = true;
+                        return None;
+                    }
+                }
                 binder.bindings.insert(key, tris.clone());
                 Some(Cow::Owned(tris))
             }
@@ -378,31 +389,24 @@ pub(crate) fn rest_states(nodes: &[RigNode]) -> Vec<DeformerState> {
     nodes.iter().map(rest_state).collect()
 }
 
-/// Binding work exceeded `Limits::max_mesh_binding_pairs`.
+/// Binding work exceeded `Limits::binding_work_budget`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BindingLimitExceeded;
 
 /// Derives E6 bindings by walking every node's rest points up the tree at
 /// rest. At rest, mesh deformers are the identity, so the walk needs no
 /// bindings of its own.
+/// Returns the bindings and the binding work done.
 pub(crate) fn compute_bindings(
     nodes: &[RigNode],
     rest: &[DeformerState],
-    max_pairs: u64,
-) -> Result<Bindings, BindingLimitExceeded> {
+    budget: u64,
+) -> Result<(Bindings, u64), BindingLimitExceeded> {
     let has_mesh = nodes.iter().any(|n| matches!(n.kind, RigKind::MeshDeformer { .. }));
     if !has_mesh {
-        return Ok(Bindings::new());
+        return Ok((Bindings::new(), 0));
     }
-    let mut binder = Binder {
-        bindings: Bindings::new(),
-        grids: HashMap::new(),
-        rest,
-        nodes,
-        work: 0,
-        cap: max_pairs,
-        exceeded: false,
-    };
+    let mut binder = Binder { bindings: Bindings::new(), grids: HashMap::new(), rest, nodes, budget, exceeded: false };
     for (i, node) in nodes.iter().enumerate() {
         if let Some(mut pts) = node.kind.rest_points() {
             map_up(nodes, rest, rest, i, &mut pts, &mut BindMode::Compute(&mut binder));
@@ -411,7 +415,8 @@ pub(crate) fn compute_bindings(
             }
         }
     }
-    Ok(binder.bindings)
+    let work = binder.total_work();
+    Ok((binder.bindings, work))
 }
 
 impl Rig {

@@ -146,6 +146,7 @@ pub struct Rig {
     node_index: HashMap<Id, usize>,
     pub(crate) bindings: Bindings,
     pub(crate) rest_states: Vec<DeformerState>,
+    binding_work: u64,
 }
 
 impl Rig {
@@ -155,6 +156,12 @@ impl Rig {
 
     pub fn node_index(&self, id: &str) -> Option<usize> {
         self.node_index.get(id).copied()
+    }
+
+    /// Work spent on mesh-deformer binding at load, in the units of
+    /// [`Limits::binding_work_budget`]. Deterministic for a given file.
+    pub fn binding_work(&self) -> u64 {
+        self.binding_work
     }
 
     /// Validates `doc` against V1–V9 and the limits, and builds the rig.
@@ -246,13 +253,16 @@ impl Validator<'_> {
             return None;
         }
         let rest_states = eval::rest_states(&nodes);
-        let Ok(bindings) = eval::compute_bindings(&nodes, &rest_states, self.limits.max_mesh_binding_pairs) else {
+        let Ok((bindings, binding_work)) =
+            eval::compute_bindings(&nodes, &rest_states, self.limits.binding_work_budget)
+        else {
             self.issue(
                 "LIMIT_MESH_BINDING",
                 None,
                 format!(
-                    "mesh-deformer binding needs more than {} point-triangle pairs",
-                    self.limits.max_mesh_binding_pairs
+                    "mesh-deformer binding exceeds this loader's work budget of {} \
+                     (a resource limit, not a format rule)",
+                    self.limits.binding_work_budget
                 ),
             );
             return None;
@@ -263,7 +273,7 @@ impl Validator<'_> {
             .filter(|(_, n)| matches!(n.kind, RigKind::Drawable { .. }))
             .map(|(i, _)| i)
             .collect();
-        Some(Rig { params, nodes, textures, drawables, param_index, node_index, bindings, rest_states })
+        Some(Rig { params, nodes, textures, drawables, param_index, node_index, bindings, rest_states, binding_work })
     }
 
     // ----- V1 -----
