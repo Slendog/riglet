@@ -200,20 +200,19 @@ fn nearest_binding_matches_inochi_including_ties() {
 }
 
 #[test]
-fn cubic_binding_is_resampled_from_inochis_formula() {
+fn cubic_bindings_are_exact() {
     let axis = [0.0f32, 0.5, 1.0];
     let xs = [0.0f32, 10.0, 0.0];
     let i = import(&deform_puppet(&axis, &xs, "Cubic"));
-    assert!(codes(&i).contains(&"CUBIC_RESAMPLED"));
+    assert!(!codes(&i).contains(&"CUBIC_RESAMPLED"));
     let rig = rig(&i);
-    // Inochi2D: Catmull-Rom with clamped neighbors on segment 0.
-    for q in [0.25f32, 0.5, 0.75] {
+    // Inochi2D: Catmull-Rom with clamped neighbors, anywhere in a segment.
+    for q in [0.1f32, 0.25, 0.5, 0.75, 0.9] {
         let want = cubic(&xs[0], &xs[0], &xs[1], &xs[2], q);
-        assert!((x_at(&rig, 0.5 * q) - want).abs() < TOL, "q={q}");
+        assert!((x_at(&rig, 0.5 * q) - want).abs() < TOL, "segment 0, q={q}");
+        let want = cubic(&xs[0], &xs[1], &xs[2], &xs[2], q);
+        assert!((x_at(&rig, 0.5 + 0.5 * q) - want).abs() < TOL, "segment 1, q={q}");
     }
-    // Between resampled keys the error stays small.
-    let mid = cubic(&xs[0], &xs[0], &xs[1], &xs[2], 0.125 / 0.5 * 0.5);
-    assert!((x_at(&rig, 0.0625) - mid).abs() < 0.5);
 }
 
 #[test]
@@ -591,4 +590,77 @@ fn errors_are_clean_and_coded() {
     })
     .unwrap();
     assert_eq!(riglet_inochi2d::import(&bad_json, &Default::default()).unwrap_err().code(), "INP_JSON");
+}
+
+// ---------- S6: rotations about x and y ----------
+
+fn rotated(rx: f32, ry: f32) -> serde_json::Value {
+    json!({"transform": {"trans": [0, 0, 0], "rot": [rx, ry, 0], "scale": [1, 1]}})
+}
+
+#[test]
+fn rotation_about_y_is_a_signed_x_scale() {
+    // 180 degrees about y mirrors x; 60 degrees about x halves y.
+    let mirrored = part(3, "m", [1.0, 1.0], [2.0, 2.0], rotated(0.0, std::f32::consts::PI));
+    let squashed = part(4, "s", [1.0, 2.0], [2.0, 4.0], rotated(std::f32::consts::FRAC_PI_3, 0.0));
+    let i = import(&puppet(vec![mirrored, squashed], vec![]));
+    let rig = rig(&i);
+    let out = eval(&rig, &[]);
+    assert_close(positions(&rig, &out, 3)[0], [-1.0, 1.0]);
+    assert_close(positions(&rig, &out, 4)[0], [1.0, 1.0]);
+    assert!(!codes(&i).iter().any(|c| c.starts_with("TRANSFORM_3D")), "{:?}", codes(&i));
+}
+
+#[test]
+fn rotation_bindings_about_y_are_exact_at_keys() {
+    let p = part(3, "p", [10.0, 0.0], [11.0, 1.0], json!({}));
+    let ry = binding(3, "transform.r.y", json!([[0], [std::f32::consts::FRAC_PI_3], [std::f32::consts::PI]]), "Linear");
+    let i = import(&puppet(vec![p], vec![param(10, "turn", 0.0, 1.0, &[0.0, 0.5, 1.0], vec![ry])]));
+    let rig = rig(&i);
+    assert_close(positions(&rig, &eval(&rig, &[(10, [0.5, 0.0])]), 3)[0], [5.0, 0.0]);
+    assert_close(positions(&rig, &eval(&rig, &[(10, [1.0, 0.0])]), 3)[0], [-10.0, 0.0]);
+    // Between keys Riglet interpolates the scale, not the angle.
+    assert!(codes(&i).contains(&"TRANSFORM_3D_ROTATION_INTERPOLATED"));
+}
+
+#[test]
+fn rotation_about_x_and_y_and_depth_warn() {
+    let child = part(
+        4,
+        "c",
+        [0.0, 0.0],
+        [1.0, 1.0],
+        json!({"transform": {"trans": [0, 0, -5], "rot": [0, 0, 0], "scale": [1, 1]}}),
+    );
+    let both = part(
+        3,
+        "b",
+        [0.0, 0.0],
+        [1.0, 1.0],
+        json!({"transform": {"trans": [0, 0, 0], "rot": [0.5, 0.5, 0], "scale": [1, 1]}, "children": [child]}),
+    );
+    let i = import(&puppet(vec![both], vec![]));
+    rig(&i);
+    let c = codes(&i);
+    assert!(c.contains(&"TRANSFORM_3D_ROTATION_DROPPED") && c.contains(&"TRANSFORM_3D_DEPTH_DROPPED"), "{c:?}");
+}
+
+#[test]
+fn fixed_function_blend_modes_map_and_linear_dodge_is_screen() {
+    use riglet_format::model::BlendMode;
+    let names =
+        [("LinearDodge", BlendMode::Screen), ("AddGlow", BlendMode::AddGlow), ("ClipToLower", BlendMode::ClipToLower)];
+    let parts = names
+        .iter()
+        .enumerate()
+        .map(|(k, (n, _))| part(3 + k as u32, n, [0.0, 0.0], [1.0, 1.0], json!({"blend_mode": n})))
+        .collect();
+    let i = import(&puppet(parts, vec![]));
+    for (k, (_, mode)) in names.iter().enumerate() {
+        let riglet_format::model::Node::Drawable(d) = &i.document.model.nodes[&format!("inochi:{}", 3 + k)] else {
+            panic!()
+        };
+        assert_eq!(d.blend_mode, *mode);
+    }
+    assert!(!codes(&i).contains(&"BLEND_MODE_UNSUPPORTED"));
 }

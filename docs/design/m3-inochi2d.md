@@ -202,7 +202,7 @@ in `extensions` losslessly, no warning.
 | Node (no transform) | GroupNode | exact |
 | Node with transform | RotationDeformer (origin = trans.xy, angle = rot.z in degrees, scale) holding the children | exact if scale.x == scale.y and rot.x == rot.y == 0; else see spec change S1 / `TRANSFORM_APPROXIMATED` |
 | `trans.z` | ext | ext (no visual effect in 2D) |
-| `rot.x`, `rot.y` != 0 | dropped from the rig, kept in ext | approx `TRANSFORM_3D_ROTATION_DROPPED` |
+| `rot.x`, `rot.y` != 0 (rest and `transform.r.x/y` bindings) | per-axis signed scale (S6): projected, `Rz Ry Rx` is `R(rz) [[cos ry, sin ry sin rx], [0, cos rx]]`, so ry scales x by cos ry and rx scales y by cos rx; bindings become additive scaleXY sets | exact alone (bindings at keys); approx `TRANSFORM_3D_ROTATION_INTERPOLATED` between keys or with several bindings on one axis, `TRANSFORM_3D_ROTATION_DROPPED` when x and y both rotate (shear dropped), `TRANSFORM_3D_DEPTH_DROPPED` when z translations below shift points |
 | Part (Drawable) | DrawableNode (positions = verts - origin) inside its transform's rotation deformer | exact |
 | **Part with children** | a group (or the Part's rotation deformer) holding the drawable FIRST, then the children, preserving transforms; the original nesting is recorded in ext so export rebuilds the Part with children | exact, round-trip tested |
 | `enabled: false` | `visible: false` | exact |
@@ -211,10 +211,10 @@ in `extensions` losslessly, no warning.
 | Composite `blend_mode` | see blend table | |
 | Composite `tint`, `screenTint` | ext (Known gap: composite tint) | approx `COMPOSITE_TINT_DROPPED` when not default |
 | Composite `propagate_meshgroup` | ext | approx `PROPAGATE_MESHGROUP_UNSUPPORTED` when true |
-| MeshGroup (static, `dynamic_deformation: false`) | MeshDeformer; its children bind to its triangles (E6) | exact for points inside the mesh; Inochi2D leaves points outside the mesh undeformed, Riglet extrapolates: approx `MESHGROUP_OUTSIDE_POINTS` only when some child point is outside |
-| MeshGroup `dynamic_deformation: true` | MeshDeformer | approx `MESHGROUP_DYNAMIC_APPROXIMATED` |
-| MeshGroup `translate_children` | ext | approx `MESHGROUP_TRANSLATE_CHILDREN` when it changes the result |
-| Transform node between a MeshGroup and a Part | Inochi2D deforms every child vertex individually; Riglet maps a rotation deformer under a mesh deformer rigidly (E5) | approx `MESHGROUP_TRANSFORM_APPROXIMATED` |
+| MeshGroup | MeshDeformer; only what Inochi2D's `setGroup` reaches is under it: drawables, their drawable children and composites with `propagate_meshgroup`. Other nodes are "blocked": moved outside the mesh deformers under rigid `:rigid` twins of the animated frames in between (exact), and their subtree isn't reached by any MeshGroup | exact for reached points its rest bitmask covers; approx `MESHGROUP_OUTSIDE_POINTS` (Inochi2D leaves points whose `floor()` corner misses every rest triangle undeformed, Riglet extrapolates) |
+| MeshGroup `dynamic_deformation` | true: maps the deformed child points, like E6, but looks them up each frame (Riglet binds at rest): approx `MESHGROUP_DYNAMIC_APPROXIMATED`. false: adds the child's own deformation after the map (E6 maps it): approx `MESHGROUP_DEFORM_APPROXIMATED` when a reached child has deform bindings | approx |
+| MeshGroup `translate_children` | a blocked plain node only has its translation moved by the mesh; Riglet gives it a rigid rotation deformer under the mesh deformer, which also rotates and scales it (E5) | approx `MESHGROUP_TRANSLATE_APPROXIMATED` (proposed S7 "translate") |
+| Animated transform on a reached drawable under a MeshGroup | Inochi2D deforms every vertex individually; Riglet maps the rotation deformer rigidly (E5). Static ones are baked into the vertices (exact); baked static ancestors of an animated one become one `:bake` rotation deformer | approx `MESHGROUP_TRANSFORM_APPROXIMATED` (proposed S7 "pointwise"; measured in `tests/meshgroup_error.rs`) |
 | `lockToRoot: true` | ext | approx `LOCK_TO_ROOT_UNSUPPORTED` |
 | SimplePhysics node | PhysicsRig (one pendulum: length, gravity, damping mapped to mobility/delay/acceleration; output param from `param` + `map_mode`), all original fields in ext | approx `PHYSICS_APPROXIMATED`; exported back exactly from ext when unchanged |
 | Camera (.inx), Shapes, Tmp, unknown types | the whole subtree's JSON kept in ext on the parent | unsupported `NODE_TYPE_UNSUPPORTED` (Camera: ext, no warning) |
@@ -251,9 +251,9 @@ Inochi2D has 19 modes. Riglet has normal, additive, multiply.
 | Inochi2D | Riglet | Kind |
 |---|---|---|
 | Normal | normal | exact |
-| Multiply (legacy GL: `DST_COLOR, ONE_MINUS_SRC_ALPHA`) | multiply | exact color; alpha *(verify: our R4 keeps destination alpha)* |
-| LinearDodge | additive | *(verify Inochi2D's alpha factors before calling it exact)* |
-| Screen, Overlay, Darken, Lighten, ColorDodge, AddGlow, ColorBurn, HardLight, SoftLight, Difference, Exclusion, Subtract, Inverse, DestinationIn, ClipToLower, SliceFromLower | normal, original name in ext | unsupported `BLEND_MODE_UNSUPPORTED` |
+| Multiply (legacy GL: `DST_COLOR, ONE_MINUS_SRC_ALPHA`) | multiply | exact (alpha keeps Ad on both) |
+| Screen, LinearDodge (identical on the legacy path), Lighten, ColorDodge, AddGlow, Subtract, Exclusion, Inverse, DestinationIn, ClipToLower, SliceFromLower | group (a) mode of the same name (LinearDodge -> screen) | exact vs Inochi2D's legacy path; under KHR_blend_equation_advanced Inochi2D draws Multiply, Lighten, ColorDodge and Exclusion differently (Screen's KHR form is the same) |
+| Overlay, Darken, ColorBurn, HardLight, SoftLight, Difference | normal, original name in ext | unsupported `BLEND_MODE_UNSUPPORTED` |
 
 ### Parameters and bindings
 
@@ -267,7 +267,7 @@ Inochi2D has 19 modes. Riglet has normal, additive, multiply.
 | `isSet` (sparse grid) | unset points filled with Inochi2D's `reInterpolate` algorithm (what Inochi2D itself evaluates with); the mask kept in ext so export restores it | exact |
 | `interpolate_mode` Linear | linear axes | exact |
 | Nearest | step axes with an extra key at each midpoint (step uses the lower key, so `[k0, mid, k1]` with values `[v0, v1, v1]` reproduces nearest exactly) | exact |
-| Cubic | linear axes resampled with extra keys (4 per interval) | approx `CUBIC_RESAMPLED` |
+| Cubic | cubic axes (S5, Inochi2D's Catmull-Rom) | exact |
 | `deform` (per-vertex deltas, node-local, before the transform) | keyform positions | exact |
 | `transform.t.x/y` (additive) | rotation deformer origin delta | exact |
 | `transform.r.z` (additive, radians) | rotation deformer angle delta (degrees) | exact |
@@ -294,7 +294,7 @@ Inochi2D has 19 modes. Riglet has normal, additive, multiply.
 | Riglet | Inochi2D | Kind |
 |---|---|---|
 | GroupNode | Node | exact |
-| composite GroupNode | Composite (blend: normal -> Normal, multiply -> Multiply, additive -> LinearDodge) | exact *(pending the alpha checks above)* |
+| composite GroupNode | Composite (blend: group (a) and normal/multiply by name; additive -> AddGlow, whose alpha is As + Ad(1 - As) instead of Ad: equal where the destination is opaque, no Inochi2D mode keeps Ad with additive color) | exact, except additive: approx `BLEND_MODE_APPROXIMATED` |
 | DrawableNode | Part (rebuilt with children when the import recorded it) | exact |
 | RotationDeformer under a group / rotation | Node with transform (trans = origin, rot.z = angle in radians, scale) | exact |
 | RotationDeformer under a warp | Node; Inochi2D has no warp frame | approx `ROTATION_UNDER_WARP` |

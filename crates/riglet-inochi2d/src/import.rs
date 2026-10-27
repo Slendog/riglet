@@ -151,6 +151,10 @@ struct Mapped {
     bake: Option<Affine>,
     children: Vec<u32>,
     vertex_count: usize,
+    /// Rest rotation about x and y (radians) and the stored scale, for
+    /// transform.r.x / r.y bindings (S6).
+    rot3: [f32; 2],
+    rest_scale: Vec2,
     texture: Option<usize>,
 }
 
@@ -221,6 +225,9 @@ struct Importer<'a> {
     /// bake applied to the MeshGroup's local coordinates).
     mesh_bakes: HashMap<Id, Affine>,
     static_deform_warned: HashSet<Id>,
+    /// Per node and axis (x = 0, y = 1): how many rest values and bindings
+    /// rotate it, and the largest angle (radians).
+    rot3_used: HashMap<u32, BTreeMap<usize, (u32, f32)>>,
 }
 
 fn warn(warnings: &mut Vec<ConversionWarning>, code: &str, object: Option<&str>, message: impl Into<String>) {
@@ -245,13 +252,25 @@ fn set_ext(base: &mut NodeBase, value: Value) {
     base.extensions = Some(m);
 }
 
-/// Inochi2D blend mode name -> Riglet (section 4a). `None` = unsupported.
+/// Inochi2D blend mode name -> Riglet (R4, design section 4a): its
+/// fixed-function modes as on its legacy GL path, where LinearDodge is the
+/// same as Screen. `None` = needs destination reads (unsupported).
 fn blend(name: &str) -> Option<BlendMode> {
-    match name {
-        "Normal" => Some(BlendMode::Normal),
-        "Multiply" => Some(BlendMode::Multiply),
-        _ => None,
-    }
+    Some(match name {
+        "Normal" => BlendMode::Normal,
+        "Multiply" => BlendMode::Multiply,
+        "Screen" | "LinearDodge" => BlendMode::Screen,
+        "Lighten" => BlendMode::Lighten,
+        "ColorDodge" => BlendMode::ColorDodge,
+        "AddGlow" => BlendMode::AddGlow,
+        "Subtract" => BlendMode::Subtract,
+        "Exclusion" => BlendMode::Exclusion,
+        "Inverse" => BlendMode::Inverse,
+        "DestinationIn" => BlendMode::DestinationIn,
+        "ClipToLower" => BlendMode::ClipToLower,
+        "SliceFromLower" => BlendMode::SliceFromLower,
+        _ => return None,
+    })
 }
 
 impl Importer<'_> {
@@ -462,20 +481,22 @@ impl Importer<'_> {
             let t = vec3(&tr, "trans", [0.0; 3]);
             let r = vec3(&tr, "rot", [0.0; 3]);
             let sf = floats(tr.get("scale"));
-            let s = [sf.first().copied().unwrap_or(1.0), sf.get(1).copied().unwrap_or(1.0)];
-            if r[0] != 0.0 || r[1] != 0.0 {
-                self.warn(
-                    "TRANSFORM_3D_ROTATION_DROPPED",
-                    Some(&id),
-                    "rotation about x/y dropped (kept in extensions)",
-                );
+            let rest_scale = [sf.first().copied().unwrap_or(1.0), sf.get(1).copied().unwrap_or(1.0)];
+            // Rotations about x and y (S6): projected orthographically,
+            // Inochi2D's T * Rz Ry Rx * S is R(rz) * [[cos ry, sin ry sin rx],
+            // [0, cos rx]] * S, so each alone is a (signed) per-axis scale.
+            let s = [rest_scale[0] * r[1].cos(), rest_scale[1] * r[0].cos()];
+            for (axis, a) in [r[0], r[1]].into_iter().enumerate() {
+                if a != 0.0 {
+                    self.note_rot3(uuid, axis, a.abs());
+                }
             }
             if flag(v, "lockToRoot", false) {
                 self.warn("LOCK_TO_ROOT_UNSUPPORTED", Some(&id), "lockToRoot is not supported (kept in extensions)");
             }
             let identity = t[0] == 0.0 && t[1] == 0.0 && r[2] == 0.0 && s == [1.0, 1.0];
             let animated = self.animated_transform.contains(&uuid);
-            let mut m = Mapped { ty: ty.clone(), ..Default::default() };
+            let mut m = Mapped { ty: ty.clone(), rot3: [r[0], r[1]], rest_scale, ..Default::default() };
 
             // MeshGroup reach (see `Reach`). A blocked node without
             // translate_children moves outside the mesh deformers (exact);
@@ -792,8 +813,8 @@ impl Importer<'_> {
         }
     }
 
-    /// A static rotation deformer equal to `b` (rotation and per-axis scale;
-    /// a shear or mirror can't be expressed and is approximated).
+    /// A static rotation deformer equal to `b` (rotation and signed per-axis
+    /// scale, S6; a shear can't be expressed and is approximated).
     fn bake_frame(&mut self, id: &str, name: &str, parent: &str, b: Affine) -> Result<(), InochiError> {
         let [x, y, t] = b.m;
         let angle = x[1].atan2(x[0]);
@@ -801,14 +822,14 @@ impl Importer<'_> {
         let sx = x[0].hypot(x[1]);
         let sy = -sin * y[0] + cos * y[1];
         let shear = cos * y[0] + sin * y[1];
-        if shear.abs() > 1e-4 * sx.max(sy.abs()) || sy <= 0.0 {
+        if shear.abs() > 1e-4 * sx.max(sy.abs()) {
             self.warn(
                 "MESHGROUP_TRANSFORM_APPROXIMATED",
                 Some(id),
-                "static transforms above this node combine to a shear or mirror, approximated",
+                "static transforms above this node combine to a shear, approximated",
             );
         }
-        self.rotation(id, name, parent, true, [t[0], t[1], 0.0], angle, [sx, sy.max(1e-6)])
+        self.rotation(id, name, parent, true, [t[0], t[1], 0.0], angle, [sx, sy])
     }
 
     /// The frame for a blocked node: `r.outside` with rigid twins of the
@@ -834,6 +855,67 @@ impl Importer<'_> {
             let sets = self.nodes.get(orig).map(|n| n.base().keyform_sets.clone()).unwrap_or_default();
             if let Some(n) = self.nodes.get_mut(twin) {
                 n.base_mut().keyform_sets = sets;
+            }
+        }
+    }
+
+    /// Records a rotation about x or y; true when the axis already had one.
+    fn note_rot3(&mut self, uuid: u32, axis: usize, angle: f32) -> bool {
+        let e = self.rot3_used.entry(uuid).or_default().entry(axis).or_insert((0, 0.0));
+        e.0 += 1;
+        e.1 = e.1.max(angle);
+        e.0 > 1
+    }
+
+    /// After the bindings: rotation about both x and y shears (dropped);
+    /// under such a node a z translation moves x and y by sin(angle) * z in
+    /// Inochi2D (orthographic projection after the 3D rotation), which
+    /// Riglet's 2D frames don't model.
+    fn check_rot3(&mut self, root: &Value) {
+        let used = std::mem::take(&mut self.rot3_used);
+        for (uuid, axes) in &used {
+            if axes.len() == 2 {
+                self.warn(
+                    "TRANSFORM_3D_ROTATION_DROPPED",
+                    Some(&node_id(*uuid)),
+                    "rotation about both x and y shears; mapped as per-axis scales without the shear",
+                );
+            }
+        }
+        let mut stack: Vec<(&Value, Option<(u32, f32)>)> = vec![(root, None)];
+        let mut depth: BTreeMap<u32, f32> = BTreeMap::new();
+        while let Some((v, under)) = stack.pop() {
+            let Some(uuid) = uuid(v, "uuid") else { continue };
+            if let Some((top, sin)) = under {
+                let tz = v.get("transform").map_or(0.0, |t| vec3(t, "trans", [0.0; 3])[2]);
+                if tz != 0.0 {
+                    let e = depth.entry(top).or_default();
+                    *e = e.max(sin * tz.abs());
+                }
+            }
+            let own = used
+                .get(&uuid)
+                .map(|a| a.values().map(|x| x.1.min(std::f32::consts::FRAC_PI_2).sin()).fold(0.0, f32::max));
+            // The strongest x/y rotation above (nested ones combine in 3D,
+            // which this only bounds).
+            let next = match (under, own) {
+                (Some(u), Some(sin)) if sin <= u.1 => Some(u),
+                (_, Some(sin)) => Some((uuid, sin)),
+                (u, None) => u,
+            };
+            for c in v.get("children").and_then(Value::as_array).into_iter().flatten() {
+                stack.push((c, next));
+            }
+        }
+        for (uuid, shift) in depth {
+            if shift > 0.01 {
+                self.warn(
+                    "TRANSFORM_3D_DEPTH_DROPPED",
+                    Some(&node_id(uuid)),
+                    format!(
+                        "z translations below this x/y-rotated node shift points by up to {shift:.2} px in Inochi2D"
+                    ),
+                );
             }
         }
     }
@@ -1115,7 +1197,8 @@ enum Interp {
 }
 
 /// Expands keys for one axis: Nearest -> step axis with a key at every
-/// midpoint (ties go up, like Inochi2D); Cubic -> 4 sub-intervals.
+/// midpoint (ties go up, like Inochi2D). Linear and Cubic map 1:1 (cubic
+/// axes, S5, are Inochi2D's formula).
 /// Returns (keys, source position per key: index + fraction).
 fn expand_axis(keys: &[f32], interp: Interp) -> (Vec<f32>, Vec<(usize, f32)>) {
     let mut out = Vec::new();
@@ -1125,16 +1208,10 @@ fn expand_axis(keys: &[f32], interp: Interp) -> (Vec<f32>, Vec<(usize, f32)>) {
         src.push((i, 0.0));
         let Some(&next) = keys.get(i + 1) else { break };
         match interp {
-            Interp::Linear => {}
+            Interp::Linear | Interp::Cubic => {}
             Interp::Nearest => {
                 out.push((k + next) / 2.0);
                 src.push((i + 1, 0.0));
-            }
-            Interp::Cubic => {
-                for q in 1..4 {
-                    out.push(k + (next - k) * q as f32 / 4.0);
-                    src.push((i, q as f32 / 4.0));
-                }
             }
         }
     }
@@ -1291,7 +1368,7 @@ impl Importer<'_> {
     }
 
     /// Axes plus a grid in Riglet order (axis 0 fastest), interpolation
-    /// expanded (Nearest -> step with midpoints, Cubic resampled).
+    /// expanded (Nearest -> step with midpoints).
     fn grid<T: reinterpolate::Value>(
         &mut self,
         puuid: u32,
@@ -1309,21 +1386,13 @@ impl Importer<'_> {
             axes.push(KeyAxis {
                 param: ParamAxis { parameter: info.id.clone(), component: c as u8 },
                 keys: k,
-                interpolation: if interp == Interp::Nearest {
-                    AxisInterpolation::Step
-                } else {
-                    AxisInterpolation::Linear
+                interpolation: match interp {
+                    Interp::Nearest => AxisInterpolation::Step,
+                    Interp::Linear => AxisInterpolation::Linear,
+                    Interp::Cubic => AxisInterpolation::Cubic,
                 },
             });
             srcs.push(s);
-        }
-        if interp == Interp::Cubic {
-            warn(
-                &mut self.warnings,
-                "CUBIC_RESAMPLED",
-                Some(object),
-                "cubic binding resampled to linear with 4 steps per interval",
-            );
         }
         let total: u64 = srcs.iter().map(|s| s.len() as u64).product();
         if total > self.limits.max_keyform_grid {
@@ -1428,7 +1497,62 @@ impl Importer<'_> {
                         self.push_set(&rid, axes, kfs, combine);
                     }
                     "transform.r.x" | "transform.r.y" => {
-                        self.warn("TRANSFORM_3D_ROTATION_DROPPED", Some(&object), format!("binding `{name}` dropped"));
+                        // S6: rotation about y scales x by cos, about x
+                        // scales y. Offsets add to the rest angle; the
+                        // scale delta is exact at the keys.
+                        let Some(rid) = target.transform.clone() else { return Ok(()) };
+                        if grid.iter().all(|&o| o == 0.0) {
+                            return Ok(());
+                        }
+                        let (axis, comp) = if name == "transform.r.y" { (1, 0) } else { (0, 1) };
+                        let a0 = target.rot3.get(axis).copied().unwrap_or(0.0);
+                        let s0 = target.rest_scale.get(comp).copied().unwrap_or(1.0);
+                        let delta = |o: f32| s0 * ((a0 + o).cos() - a0.cos());
+                        let kfs = kf(&|o| {
+                            let mut xy = [0.0; 2];
+                            if let Some(c) = xy.get_mut(comp) {
+                                *c = delta(o);
+                            }
+                            Keyform { scale_xy: Some(xy), ..Default::default() }
+                        });
+                        // Between keys Inochi2D interpolates the angle,
+                        // Riglet the scale: compare at the midpoints.
+                        let n0 = axes.first().map_or(1, |a| a.keys.len()).max(1);
+                        let mut worst = 0.0f32;
+                        if interp != Interp::Nearest {
+                            for (i, &o) in grid.iter().enumerate() {
+                                for j in [i + 1, i + n0] {
+                                    if j == i + 1 && j % n0 == 0 {
+                                        continue;
+                                    }
+                                    if let Some(&p) = grid.get(j) {
+                                        let exact = (a0 + (o + p) / 2.0).cos();
+                                        let mid = ((a0 + o).cos() + (a0 + p).cos()) / 2.0;
+                                        worst = worst.max((exact - mid).abs() * s0.abs());
+                                    }
+                                }
+                            }
+                        }
+                        if worst > 1e-3 {
+                            self.warn(
+                                "TRANSFORM_3D_ROTATION_INTERPOLATED",
+                                Some(&object),
+                                format!(
+                                    "binding `{name}`: scale differs from Inochi2D between keys by up to {worst:.4}"
+                                ),
+                            );
+                        }
+                        let max = grid.iter().map(|o| (a0 + o).abs()).fold(0.0f32, f32::max);
+                        if self.note_rot3(nuuid, axis, max) {
+                            self.warn(
+                                "TRANSFORM_3D_ROTATION_INTERPOLATED",
+                                Some(&object),
+                                format!(
+                                    "several `{name}` bindings: Riglet adds their scale changes, Inochi2D their angles"
+                                ),
+                            );
+                        }
+                        self.push_set(&rid, axes, kfs, Combine::Add);
                     }
                     "transform.t.z" => {}
                     "opacity" => {
@@ -1439,11 +1563,11 @@ impl Importer<'_> {
                     "zSort" => {
                         let members = self.scope_members(nuuid);
                         let varies = grid.iter().zip(grid.iter().skip(1)).any(|(a, b)| a != b);
-                        if interp == Interp::Linear && varies {
+                        if interp != Interp::Nearest && varies {
                             self.warn(
                                 "DRAW_ORDER_INTERPOLATION",
                                 Some(&object),
-                                "linear zSort binding: Riglet switches draw order at the nearest key (E3)",
+                                "linear or cubic zSort binding: Riglet switches draw order at the nearest key (E3)",
                             );
                         }
                         let kfs = kf(&|z| Keyform { draw_order: Some(-z), ..Default::default() });
@@ -1783,6 +1907,7 @@ pub fn import(bytes: &[u8], options: &Options) -> Result<Import, InochiError> {
         twins: Vec::new(),
         mesh_bakes: HashMap::new(),
         static_deform_warned: HashSet::new(),
+        rot3_used: HashMap::new(),
     };
     im.textures(c.textures)?;
     im.params(&params)?;
@@ -1792,6 +1917,7 @@ pub fn import(bytes: &[u8], options: &Options) -> Result<Import, InochiError> {
     im.resolve_masks();
     im.bindings(&params)?;
     im.copy_twin_sets();
+    im.check_rot3(root);
 
     if json.get("automation").and_then(Value::as_array).is_some_and(|a| !a.is_empty()) {
         im.warn("AUTOMATION_UNSUPPORTED", None, "automation (sine/physics) is kept in extensions");

@@ -75,6 +75,13 @@ depends on format + render + converters. Only the editor depends on egui.
    from observed files.
 6. .moc3 reverse-engineering toolchain, then read-only importer, then exporter
    for one older moc3 version.
+7. Physics: evaluate the format's `PhysicsRig` (parameters driven by
+   simulated motion), with one model that covers both Inochi2D
+   SimplePhysics nodes and Live2D physics3 pendulum chains, and the
+   importers/exporters mapped onto it. Essential for real VTuber use (hair,
+   clothes and accessories swing); until then both importers keep physics
+   in `extensions` only (`SIMPLE_PHYSICS_UNSUPPORTED`). Its position in the
+   order is open.
 
 ## Rules
 
