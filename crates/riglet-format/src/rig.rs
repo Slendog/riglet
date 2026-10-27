@@ -170,6 +170,29 @@ impl Rig {
         self.node_index.get(id).copied()
     }
 
+    /// The drawable or composite slot of node `node` (see
+    /// [`crate::EvalOutput`]), if it is a scope member.
+    pub fn slot_of(&self, node: usize) -> Option<Member> {
+        self.slot.get(node).copied().flatten()
+    }
+
+    /// Deepest composite nesting: 0 without composites, 1 for composites
+    /// that contain no other composite, and so on.
+    pub fn composite_depth(&self) -> usize {
+        let mut depth = vec![0usize; self.composites.len()];
+        let mut max = 0;
+        // Composites are in pre-order, so an enclosing composite's depth is
+        // known before its children's.
+        for (slot, &node) in self.composites.iter().enumerate() {
+            let parent_depth = self.scope.get(node).copied().flatten().and_then(|c| depth.get(c).copied()).unwrap_or(0);
+            if let Some(d) = depth.get_mut(slot) {
+                *d = parent_depth + 1;
+                max = max.max(*d);
+            }
+        }
+        max
+    }
+
     /// Work spent on mesh-deformer binding at load, in the units of
     /// [`Limits::binding_work_budget`]. Deterministic for a given file.
     pub fn binding_work(&self) -> u64 {

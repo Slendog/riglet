@@ -1,0 +1,20 @@
+[package]
+name = "riglet-render"
+description = "GPU renderer for Riglet rigs (offscreen and windowed share one path)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+riglet-format = { path = "../riglet-format" }
+wgpu.workspace = true
+png.workspace = true
+pollster.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+riglet-fixtures = { path = "../riglet-fixtures" }
+
+[lints]
+workspace = true
