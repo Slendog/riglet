@@ -161,29 +161,78 @@ fn normalize(p: &RigParam, raw: [f32; 2]) -> [f32; 2] {
     out
 }
 
-/// Position of `v` on one axis (E3): lower key index, weight toward the
-/// next key, and the key used for draw order.
-fn axis_position(keys: &[f32], v: f32, interpolation: AxisInterpolation) -> (usize, f32, usize) {
+/// Where `v` falls on one axis (E3): up to four (key index, weight) taps
+/// with distinct indices, and the key used for draw order.
+#[derive(Debug, Clone, Copy)]
+struct AxisTaps {
+    taps: [(usize, f32); 4],
+    len: usize,
+    nearest: usize,
+}
+
+impl AxisTaps {
+    fn one(i: usize) -> AxisTaps {
+        AxisTaps { taps: [(i, 1.0); 4], len: 1, nearest: i }
+    }
+
+    fn taps(&self) -> &[(usize, f32)] {
+        self.taps.get(..self.len).unwrap_or(&[])
+    }
+
+    /// Adds `w` to key `i`, merging repeated indices (clamped cubic ends).
+    fn add(&mut self, i: usize, w: f32) {
+        let len = self.len;
+        if let Some(t) = self.taps.iter_mut().take(len).find(|t| t.0 == i) {
+            t.1 += w;
+        } else if let Some(t) = self.taps.get_mut(len) {
+            *t = (i, w);
+            self.len += 1;
+        }
+    }
+}
+
+/// Uniform Catmull-Rom weights for p0..p3 at t (E3 cubic; Inochi2D's
+/// inmath `cubic`).
+pub fn cubic_weights(t: f32) -> [f32; 4] {
+    let (t2, t3) = (t * t, t * t * t);
+    [-0.5 * t3 + t2 - 0.5 * t, 1.5 * t3 - 2.5 * t2 + 1.0, -1.5 * t3 + 2.0 * t2 + 0.5 * t, 0.5 * t3 - 0.5 * t2]
+}
+
+fn axis_taps(keys: &[f32], v: f32, interpolation: AxisInterpolation) -> AxisTaps {
     let n = keys.len();
     let first = keys.first().copied().unwrap_or(0.0);
     let last = keys.last().copied().unwrap_or(0.0);
     if n <= 1 || v <= first {
-        return (0, 0.0, 0);
+        return AxisTaps::one(0);
     }
     if v >= last {
-        return (n - 1, 0.0, n - 1);
+        return AxisTaps::one(n - 1);
     }
     let i = keys.partition_point(|&k| k <= v).saturating_sub(1).min(n - 2);
     let (k0, k1) = (keys.get(i).copied().unwrap_or(first), keys.get(i + 1).copied().unwrap_or(last));
+    let t = (v - k0) / (k1 - k0);
+    // Draw order uses the nearest key on linear and cubic axes; ties go to
+    // the lower key.
+    let nearest = if t > 0.5 { i + 1 } else { i };
+    if interpolation == AxisInterpolation::Step || t <= 0.0 {
+        return AxisTaps::one(i);
+    }
+    let mut a = AxisTaps { taps: [(0, 0.0); 4], len: 0, nearest };
     match interpolation {
-        AxisInterpolation::Step => (i, 0.0, i),
+        AxisInterpolation::Step => {}
         AxisInterpolation::Linear => {
-            let t = (v - k0) / (k1 - k0);
-            // Draw order uses the nearest key; ties go to the lower key.
-            let nearest = if t > 0.5 { i + 1 } else { i };
-            (i, t, nearest)
+            a.add(i, 1.0 - t);
+            a.add(i + 1, t);
+        }
+        AxisInterpolation::Cubic => {
+            let [w0, w1, w2, w3] = cubic_weights(t);
+            a.add(i.saturating_sub(1), w0);
+            a.add(i, w1);
+            a.add(i + 1, w2);
+            a.add((i + 2).min(n - 1), w3);
         }
     }
+    a
 }
 
 /// Sum of keyform deltas ("add" sets) and product of factors ("multiply"
@@ -242,63 +291,71 @@ fn add_scaled<const N: usize>(acc: &mut [f32; N], delta: Option<[f32; N]>, w: f3
     }
 }
 
-/// E3: multilinear blend inside one set (draw order: nearest grid point).
+/// E3: per-axis blend inside one set (linear: multilinear; cubic:
+/// Catmull-Rom; draw order: nearest grid point).
 /// "add" sets add their interpolated deltas; "multiply" sets multiply in
 /// their interpolated factors, a missing property counting as 1 (S2).
 fn eval_set(set: &RigSet, values: &[[f32; 2]], acc: &mut Accum) {
     let multiply = set.combine == Combine::Multiply;
     let (mut opacity_f, mut scale_f, mut scale_xy_f, mut color_f) = (0.0f32, 0.0f32, [0.0f32; 2], [0.0f32; 3]);
-    let mut base = 0usize;
-    let mut stride = 1usize;
     let mut nearest = 0usize;
-    let mut branching: Vec<(usize, f32)> = Vec::new();
+    let mut stride = 1usize;
+    let mut axes: Vec<(usize, AxisTaps)> = Vec::with_capacity(set.axes.len());
     for axis in &set.axes {
         let v = values.get(axis.param).and_then(|p| p.get(axis.component)).copied().unwrap_or(0.0);
-        let (i, t, near) = axis_position(&axis.keys, v, axis.interpolation);
-        base += i * stride;
-        nearest += near * stride;
-        if t > 0.0 {
-            branching.push((stride, t));
-        }
+        let taps = axis_taps(&axis.keys, v, axis.interpolation);
+        nearest += taps.nearest * stride;
+        axes.push((stride, taps));
         stride = stride.saturating_mul(axis.keys.len());
     }
 
-    let corners = 1u64.checked_shl(branching.len() as u32).unwrap_or(u64::MAX);
-    for mask in 0..corners {
-        let mut index = base;
+    // Every combination of one tap per axis (an odometer over the axes); at
+    // most the grid size, since taps per axis <= keys per axis.
+    let mut digit = vec![0usize; axes.len()];
+    loop {
+        let mut index = 0usize;
         let mut w = 1.0f32;
-        for (bit, &(s, t)) in branching.iter().enumerate() {
-            if mask & (1 << bit) != 0 {
-                index += s;
-                w *= t;
+        for ((s, taps), &d) in axes.iter().zip(&digit) {
+            let (k, wk) = taps.taps().get(d).copied().unwrap_or((0, 0.0));
+            index += k * s;
+            w *= wk;
+        }
+        if w != 0.0
+            && let Some(kf) = set.keyforms.get(index)
+        {
+            if multiply {
+                opacity_f += kf.opacity.unwrap_or(1.0) * w;
+                scale_f += kf.scale.unwrap_or(1.0) * w;
+                add_scaled(&mut scale_xy_f, Some(kf.scale_xy.unwrap_or([1.0; 2])), w);
+                add_scaled(&mut color_f, Some(kf.multiply_color.unwrap_or([1.0; 3])), w);
             } else {
-                w *= 1.0 - t;
+                if let Some(p) = &kf.positions {
+                    for (a, d) in acc.positions.iter_mut().zip(p) {
+                        a[0] += d[0] * w;
+                        a[1] += d[1] * w;
+                    }
+                }
+                acc.opacity += kf.opacity.unwrap_or(0.0) * w;
+                acc.angle += kf.angle.unwrap_or(0.0) * w;
+                acc.scale += kf.scale.unwrap_or(0.0) * w;
+                add_scaled(&mut acc.scale_xy, kf.scale_xy, w);
+                add_scaled(&mut acc.origin, kf.origin, w);
+                add_scaled(&mut acc.multiply_color, kf.multiply_color, w);
+                add_scaled(&mut acc.screen_color, kf.screen_color, w);
             }
         }
-        if w == 0.0 {
-            continue;
-        }
-        let Some(kf) = set.keyforms.get(index) else { continue };
-        if multiply {
-            opacity_f += kf.opacity.unwrap_or(1.0) * w;
-            scale_f += kf.scale.unwrap_or(1.0) * w;
-            add_scaled(&mut scale_xy_f, Some(kf.scale_xy.unwrap_or([1.0; 2])), w);
-            add_scaled(&mut color_f, Some(kf.multiply_color.unwrap_or([1.0; 3])), w);
-            continue;
-        }
-        if let Some(p) = &kf.positions {
-            for (a, d) in acc.positions.iter_mut().zip(p) {
-                a[0] += d[0] * w;
-                a[1] += d[1] * w;
+        let mut done = true;
+        for ((_, taps), d) in axes.iter().zip(digit.iter_mut()) {
+            *d += 1;
+            if *d < taps.len {
+                done = false;
+                break;
             }
+            *d = 0;
         }
-        acc.opacity += kf.opacity.unwrap_or(0.0) * w;
-        acc.angle += kf.angle.unwrap_or(0.0) * w;
-        acc.scale += kf.scale.unwrap_or(0.0) * w;
-        add_scaled(&mut acc.scale_xy, kf.scale_xy, w);
-        add_scaled(&mut acc.origin, kf.origin, w);
-        add_scaled(&mut acc.multiply_color, kf.multiply_color, w);
-        add_scaled(&mut acc.screen_color, kf.screen_color, w);
+        if done {
+            break;
+        }
     }
     if multiply {
         acc.opacity_factor *= opacity_f;
@@ -565,7 +622,10 @@ impl Rig {
                 let rest = rest_state.scale.get(k).copied().unwrap_or(1.0);
                 let delta = accum.scale + accum.scale_xy.get(k).copied().unwrap_or(0.0);
                 let factor = accum.scale_factor.get(k).copied().unwrap_or(1.0);
-                *out = ((rest + delta) * factor).max(MIN_SCALE);
+                // E4: |scale| >= MIN_SCALE, keeping the sign (a negative scale
+                // mirrors; 0 counts as positive).
+                let v = (rest + delta) * factor;
+                *out = if v < 0.0 { v.min(-MIN_SCALE) } else { v.max(MIN_SCALE) };
             }
 
             if let RigKind::Drawable { draw_order, multiply_color, screen_color, .. } = &node.kind {

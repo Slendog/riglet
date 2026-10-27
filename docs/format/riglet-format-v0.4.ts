@@ -31,7 +31,9 @@
  *     reader rejects a newer minor than its own.
  *   - major: breaking changes; readers migrate older majors.
  *
- * Migration 0.3.x -> 0.4.0: none (only optional fields were added).
+ * Migration 0.3.x -> 0.4.0: none (only optional fields and values were
+ * added). One evaluation change: a rotation scale that evaluates below 0
+ * used to clamp to +1e-6 and now mirrors (E4, S6).
  *
  * Migration 0.2.x -> 0.3.0: each composite group gets rest.drawOrder = the
  * lowest rest.drawOrder of the drawables in its subtree (0 if it has none),
@@ -205,7 +207,8 @@ export interface RotationDeformerNode extends NodeBase {
   rest: {
     origin: Vec2;                  // parent space
     angle: number;                 // degrees, positive = clockwise on screen
-    scale: number | Vec2;          // uniform, or [sx, sy] (S1; local frame, before rotation)
+    scale: number | Vec2;          // uniform, or [sx, sy] (S1; local frame, before rotation);
+                                   // negative = mirror on that axis (S6)
     opacity: number;
   };
 }
@@ -249,7 +252,7 @@ export interface KeyformSet {
 export interface KeyAxis {
   param: ParamAxis;
   keys: number[];                  // strictly ascending, finite parameter values
-  interpolation: "linear" | "step";
+  interpolation: "linear" | "step" | "cubic";   // E3; "cubic" (S5) from Inochi2D
 }
 
 /** Only the properties present are animated; missing = zero delta (or
@@ -342,10 +345,22 @@ export interface CurveKey {
  *     - linear: in the interval [k_i, k_i+1] containing v,
  *       t = (v - k_i) / (k_i+1 - k_i).
  *     - step: the greatest key <= v (the lower key), t = 0.
+ *     - cubic (S5): uniform Catmull-Rom in key INDEX space (Inochi2D's
+ *       inmath `cubic`; key spacing only enters through t). With i and t as
+ *       for linear and the four keys i-1, i, i+1, i+2, each index clamped
+ *       to [0, n-1] (an end key repeats), the weights are
+ *         w0 = -t^3/2 + t^2 - t/2       w1 = 3t^3/2 - 5t^2/2 + 1
+ *         w2 = -3t^3/2 + 2t^2 + t/2     w3 = t^3/2 - t^2/2
+ *       (they sum to 1; weights of a repeated index add). It passes
+ *       through every key and can overshoot between them; E4's clamps
+ *       apply after combining as usual. With two keys it is NOT linear.
+ *     - Several axes: the blend is the tensor product of the per-axis
+ *       weights (multilinear when every axis is linear). Inochi2D's
+ *       bicubic binding is exactly this with both axes cubic.
  *     - All properties except drawOrder: multilinear blend of the 2^N
  *       corner keyforms with the per-axis weights.
  *     - drawOrder (PROVISIONAL, to verify against Live2D samples): never
- *       interpolated. On each linear axis take the nearest key (ties go to
+ *       interpolated. On each linear or cubic axis take the nearest key (ties go to
  *       the lower key); on each step axis take the lower key, as for every
  *       other property. Use that one grid point's delta. This avoids
  *       flicker when two drawables cross.
@@ -355,7 +370,8 @@ export interface CurveKey {
  *               * product of the factors of its "multiply" sets (S2),
  *       then clamped:
  *         opacity, multiplyColor, screenColor (each channel)   [0, 1]
- *         scale (each axis)                                     >= 1e-6
+ *         scale (each axis): |s| >= 1e-6, keeping the sign (S6;
+ *           a negative scale mirrors; 0 counts as positive)
  *         angle, origin, positions, drawOrder                   unclamped
  *       Inside a multiply set, factors interpolate like deltas (E3).
  *     - Scale per axis: sx = rest_x + scale delta + scaleXY delta x (and
@@ -562,7 +578,9 @@ export interface CurveKey {
  *     - No anti-aliasing (no MSAA, no post-process AA).
  *     - Culling only when drawable.culling is true: triangles that appear
  *       counter-clockwise on screen (+Y down) are discarded (PROVISIONAL).
- *       Otherwise both windings are drawn.
+ *       Otherwise both windings are drawn. The winding is the final one on
+ *       screen, so a mirror (negative scale, S6; a fold) flips which side
+ *       is culled.
  *
  * R8. Output image. PNG, RGBA8, straight (non-premultiplied) alpha, W x H.
  *     Per pixel, from 8-bit premultiplied (p, a):
@@ -718,7 +736,6 @@ export interface CurveKey {
  *     v0.4.x, spec-changes.md.)
  *   - Inochi2D screens premultiplied color with an extra alpha factor
  *     (`t + S*a - t*S*a`); converted exactly only for opaque texels.
- *   - Cubic interpolation of bindings (resampled on import).
  *   - Inochi2D allows children under Parts, which V2 rejects. The importer
  *     restructures them without loss (insert a group, keep transforms),
  *     with a round-trip test.
@@ -734,7 +751,9 @@ export interface CurveKey {
  *     rotation deformers scale uniformly) and S2 multiply sets (Live2D
  *     keyforms are absolute values per grid point; a product of sets
  *     becomes a merged grid, exact at grid points only), with warnings.
- *   - Rotation deformer reflect X/Y.
+ *   - Export must resample S5 cubic axes (Live2D interpolates linearly).
+ *   - Rotation deformer reflect X/Y: maps to S6 negative scale on import;
+ *     export maps mirrors back where they fit Live2D's flags.
  *   - Warp quad vs triangle cell interpolation.
  *   - Expressions (exp3: Add/Multiply/Overwrite) as their own type.
  *   - Motion fade-in/out and user-data events.

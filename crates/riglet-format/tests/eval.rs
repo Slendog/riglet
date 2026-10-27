@@ -361,16 +361,19 @@ fn rotation_under_root() {
 }
 
 #[test]
-fn rotation_scale_clamps_to_minimum() {
+fn rotation_scale_magnitude_clamps_to_minimum() {
     let mut b = Builder::new();
     b.param("p", 0.0, 1.0, 0.0);
     b.rotation("r", "root", [0.0, 0.0], 0.0, 1.0);
     b.drawable("d", "r", &[[10.0, 0.0]]);
-    let kfs = vec![Keyform::default(), Keyform { scale: Some(-3.0), ..Default::default() }];
+    let kfs = vec![Keyform::default(), Keyform { scale: Some(-2.0), ..Default::default() }];
     b.set("r", &[linear("p", &[0.0, 1.0])], kfs);
     let rig = b.rig();
-    let x = positions(&rig, &eval(&rig, &[("p", [1.0, 0.0])]), "d")[0][0];
+    // 1 - 2 * 0.5 = 0: |scale| clamps to MIN_SCALE, 0 counts as positive.
+    let x = positions(&rig, &eval(&rig, &[("p", [0.5, 0.0])]), "d")[0][0];
     assert!(x > 0.0 && x < 1e-3, "scale must clamp to a small positive value, got x = {x}");
+    // 1 - 2 = -1: a mirror (S1, signed scale).
+    assert_close(positions(&rig, &eval(&rig, &[("p", [1.0, 0.0])]), "d")[0], [-10.0, 0.0]);
 }
 
 #[test]
@@ -684,4 +687,96 @@ fn multiply_scale_applies_per_axis() {
     let rig = b.rig();
     // rest 2 x factor 2 x per-axis (1, 0.5) = (4, 2).
     assert_close(positions(&rig, &eval(&rig, &[("m", [1.0, 0.0])]), "d")[0], [4.0, 2.0]);
+}
+
+// ---------- v0.4: cubic axes, signed scale ----------
+
+fn cubic(p: &'static str, keys: &'static [f32]) -> (&'static str, u8, &'static [f32], AxisInterpolation) {
+    (p, 0, keys, AxisInterpolation::Cubic)
+}
+
+/// Inochi2D's inmath `cubic` (uniform Catmull-Rom), written out.
+fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
+    let a = -0.5 * p0 + 1.5 * p1 - 1.5 * p2 + 0.5 * p3;
+    let b = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3;
+    let c = -0.5 * p0 + 0.5 * p2;
+    a * t * t * t + b * t * t + c * t + p1
+}
+
+#[test]
+fn cubic_axis_is_uniform_catmull_rom_with_clamped_ends() {
+    let mut b = Builder::new();
+    b.param("p", 0.0, 10.0, 0.0);
+    one_point(&mut b);
+    let xs = [0.0, 4.0, 1.0, 9.0, 3.0];
+    let kfs = xs.iter().map(|&x| b.positions(&[[x, 0.0]])).collect();
+    // Non-uniform key spacing: t is per interval, the curve is uniform in
+    // key index (Inochi2D's convention).
+    let keys: &'static [f32] = &[0.0, 1.0, 3.0, 4.0, 10.0];
+    b.set("d", &[cubic("p", keys)], kfs);
+    let at = |v: f32| x_of(&b, &[("p", [v, 0.0])]);
+    // Inside: neighbors 0..3 around interval [1, 3].
+    assert_close_f(at(2.0), catmull_rom(xs[0], xs[1], xs[2], xs[3], 0.5));
+    // First interval: the missing left neighbor repeats key 0.
+    assert_close_f(at(0.25), catmull_rom(xs[0], xs[0], xs[1], xs[2], 0.25));
+    // Last interval: the missing right neighbor repeats the last key.
+    assert_close_f(at(7.0), catmull_rom(xs[2], xs[3], xs[4], xs[4], 0.5));
+    // Passes through every key; clamps outside like linear.
+    for (k, x) in keys.iter().zip(xs) {
+        assert_close_f(at(*k), x);
+    }
+    assert_close_f(at(-3.0), xs[0]);
+}
+
+#[test]
+fn cubic_2d_is_the_tensor_product_and_mixes_with_linear() {
+    let mut b = Builder::new();
+    b.param("a", 0.0, 3.0, 0.0).param("c", 0.0, 1.0, 0.0);
+    one_point(&mut b);
+    // 4 cubic keys on a, 2 linear keys on c; value = f(i) + 100 * j.
+    let f = [0.0, 5.0, -2.0, 7.0];
+    let mut kfs = Vec::new();
+    for j in 0..2 {
+        for fi in f {
+            kfs.push(b.positions(&[[fi + 100.0 * j as f32, 0.0]]));
+        }
+    }
+    b.set("d", &[cubic("a", &[0.0, 1.0, 2.0, 3.0]), linear("c", &[0.0, 1.0])], kfs);
+    let got = x_of(&b, &[("a", [1.3, 0.0]), ("c", [0.25, 0.0])]);
+    assert_close_f(got, catmull_rom(f[0], f[1], f[2], f[3], 0.3) + 25.0);
+}
+
+#[test]
+fn cubic_axis_draw_order_uses_the_nearest_key() {
+    let mut b = Builder::new();
+    b.param("p", 0.0, 1.0, 0.0);
+    one_point(&mut b);
+    let kfs = vec![
+        Keyform { draw_order: Some(0.0), ..Default::default() },
+        Keyform { draw_order: Some(5.0), ..Default::default() },
+    ];
+    b.set("d", &[cubic("p", &[0.0, 1.0])], kfs);
+    let rig = b.rig();
+    assert_close_f(eval(&rig, &[("p", [0.5, 0.0])]).drawables[0].draw_order, 0.0);
+    assert_close_f(eval(&rig, &[("p", [0.6, 0.0])]).drawables[0].draw_order, 5.0);
+}
+
+#[test]
+fn negative_scale_mirrors_and_keeps_its_sign_near_zero() {
+    let mut b = Builder::new();
+    b.param("p", 0.0, 1.0, 0.0);
+    b.rotation("r", "root", [100.0, 0.0], 0.0, 1.0);
+    if let Node::Rotation(r) = b.node_mut("r") {
+        r.rest.scale = riglet_format::model::Scale::PerAxis([-2.0, 1.0]);
+    }
+    b.drawable("d", "r", &[[10.0, 5.0]]);
+    // At p = 1 the x scale goes to -2 + 2 = 0: clamped to +MIN_SCALE.
+    let kfs = vec![Keyform::default(), Keyform { scale_xy: Some([2.0, 0.0]), ..Default::default() }];
+    b.set("r", &[linear("p", &[0.0, 1.0])], kfs);
+    let rig = b.rig();
+    assert_close(positions(&rig, &eval(&rig, &[]), "d")[0], [80.0, 5.0]);
+    assert_close(positions(&rig, &eval(&rig, &[("p", [1.0, 0.0])]), "d")[0], [100.0, 5.0]);
+    // Just short of zero: still negative, so still mirrored.
+    let x = positions(&rig, &eval(&rig, &[("p", [0.999_999_9, 0.0])]), "d")[0][0];
+    assert!(x <= 100.0, "{x}");
 }

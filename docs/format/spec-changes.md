@@ -7,10 +7,11 @@ normative text; entries here record the reasoning.
 
 ---
 
-## v0.4.0 — Inochi2D-driven additions (status: ACCEPTED S1, S2, S4, 2026-10-27; blend group (a) PROPOSED)
+## v0.4.0 — Inochi2D-driven additions (status: ACCEPTED S1, S2, S4, 2026-10-27; S5, S6, R2 border and blend group (a) ACCEPTED 2026-10-27 after the M3 import review; S7 PROPOSED)
 
 Additive (minor) changes needed for exact Inochi2D import. Migration from
-0.3.x: none.
+0.3.x: none. v0.4.0 had not been released when S5-S6, R2 and group (a)
+were folded in, so they stay in 0.4.0 instead of a 0.5.0.
 
 - **S1. Non-uniform scale on rotation deformers.** `rest.scale` is a number
   or `[sx, sy]`; Keyform gains `scaleXY`. E5 applies `R(angle) * diag(sx,
@@ -25,17 +26,61 @@ Additive (minor) changes needed for exact Inochi2D import. Migration from
 - **S4. Binary mask threshold.** `DrawableNode.maskThreshold`: as a mask
   source, coverage is 1 where alpha > threshold. Inochi2D discards mask
   fragments with `alpha <= threshold`.
+- **S5. Cubic key axes.** `KeyAxis.interpolation: "cubic"`: uniform
+  Catmull-Rom in key-index space with clamped neighbor indices, exactly
+  Inochi2D 0.8.7's `interpolateCubic` (`core/param/binding.d` l.766-801)
+  and inmath's `cubic`; several axes combine as a tensor product (that is
+  Inochi2D's bicubic). Replaces the importer's 4-per-interval resample
+  (`CUBIC_RESAMPLED`, now gone); export to formats without cubic keeps a
+  resample with a warning.
+- **S6. Signed scale.** A rotation deformer's evaluated scale clamps to
+  `|s| >= 1e-6` keeping its sign, instead of `s >= 1e-6`: a negative scale
+  mirrors. Reason: Inochi2D's rotations about x and y. Its node matrix is
+  `T * Rz(rz) Ry(ry) Rx(rx) * S` (inmath `quat.eulerRotation(x, y, z)`);
+  projected orthographically, the 2x2 part is `R(rz) * [[cos ry,
+  sin ry sin rx], [0, cos rx]] * diag(sx, sy)`. With only one of rx, ry
+  non-zero that is exactly a per-axis scale by cos ry (x) or cos rx (y),
+  so 180 degrees is a mirror; with both it shears (kept as
+  `TRANSFORM_3D_ROTATION_DROPPED`). Behavior change: a scale that
+  evaluates below zero used to collapse to +1e-6 (no known file relies on
+  it). Culling (R7) uses the final screen winding, so a mirror flips which
+  side is culled.
+- **R2 border (amends R2).** Texture address mode: clamp-to-border with a
+  transparent black border instead of clamp-to-edge, matching Inochi2D
+  (`GL_CLAMP_TO_BORDER`, `core/texture.d` l.39, 267, 359). Implemented in
+  the shader on a clamp-to-edge sampler (no border-color feature needed,
+  works on WebGL2): the bilinear sample is multiplied per axis by
+  `clamp(x + 1, 0, 1) * clamp(W - x, 0, 1)` with `x = u * W - 0.5`, which is
+  exact for premultiplied textures.
+- **Blend group (a).** Modes reproducible with fixed-function blending,
+  matching Inochi2D's legacy GL path (`core/nodes/common.d`): screen,
+  lighten, colorDodge, addGlow, subtract, exclusion, inverse,
+  destinationIn, clipToLower, sliceFromLower (formulas in R4 and in
+  docs/design/m3-inochi2d.md section 4a), each with a golden fixture.
+  Inochi2D's LinearDodge imports as screen (identical on the legacy path).
+  Destination-read modes (Overlay, Darken, ColorBurn, HardLight,
+  SoftLight, Difference) stay in Known gaps.
 - **Known gaps:** Live2D export must merge or approximate S1 and S2 with
   warnings.
-- **PROPOSED, not yet in the spec: blend modes reproducible with
-  fixed-function blending**, matching Inochi2D's legacy GL path
-  (`core/nodes/common.d`): screen (also Inochi2D's LinearDodge), lighten,
-  colorDodge (legacy), addGlow, subtract, exclusion, inverse,
-  destinationIn, clipToLower, sliceFromLower. Formulas in
-  docs/design/m3-inochi2d.md section 4a. Each would get a golden fixture.
-  Destination-read modes (Overlay, Darken, ColorBurn, HardLight, SoftLight,
-  Difference) stay in Known gaps.
-
+- **S7 (PROPOSED, not in the spec): how a rotation deformer follows a
+  mesh deformer parent.** `RotationDeformerNode.meshParent?: "rigid" |
+  "translate" | "pointwise"` (default "rigid" = today's E5). "translate":
+  only the origin follows the bound triangle (dθ = 0, ds = 1), which is
+  Inochi2D's `translate_children` for plain nodes. "pointwise": E5 maps the
+  points into the mesh deformer's space, then every point goes through
+  its own triangle, bound at rest through the rest chain like a warp's
+  points (E6); this is Inochi2D's per-vertex MeshGroup filtering of parts
+  with animated transforms. Measured on Midori (Inochi2D 0.8.7 reference
+  in `crates/riglet-inochi2d/tests/reference/`, 541 parameter samples):
+  today's rigid mapping is off by p95 70 px / p99 118 px / max 257 px on
+  the 65 affected drawables (parameters Head and Body Yaw-Pitch, Roll);
+  "pointwise" with the E6 rest binding gives p95 0.3 px / p99 2.8 px under
+  dynamic MeshGroups. Under MeshGroups without dynamic_deformation it is
+  p95 6 px / p99 19 px, because there Inochi2D adds the child's own
+  deformation after the map (E6 maps it); an optional
+  `MeshDeformerNode.deltas?: "mapped" | "added"` would close that too.
+  Points Inochi2D leaves undeformed (its rest bitmask misses them; ~0.4%
+  of vertex samples) stay approximated (`MESHGROUP_OUTSIDE_POINTS`).
 ---
 
 ## v0.3.0 — rendering semantics and composite fields (status: ACCEPTED with amendments, 2026-10-27)

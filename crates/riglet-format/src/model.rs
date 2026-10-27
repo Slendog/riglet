@@ -427,6 +427,8 @@ pub enum Combine {
 pub enum AxisInterpolation {
     Linear,
     Step,
+    /// Uniform Catmull-Rom over the neighboring keys (E3).
+    Cubic,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
