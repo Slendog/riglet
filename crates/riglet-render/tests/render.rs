@@ -17,8 +17,11 @@ use riglet_fixtures::fixtures;
 use riglet_format::{EvalOutput, Limits, ParamValues, Rig};
 use riglet_render::{Budgets, FrameOptions, Image, RenderError, Renderer, RendererOptions};
 
-/// Largest per-channel difference that still counts as equal.
-const CHANNEL_TOLERANCE: u8 = 4;
+/// Largest per-channel difference that still counts as equal. Bilinear
+/// filtering rounds differently between drivers (Metal vs lavapipe differ
+/// by up to 5 on soft alpha ramps); real errors (wrong premultiply, flipped
+/// UVs, wrong blend) differ by far more.
+const CHANNEL_TOLERANCE: u8 = 8;
 /// Pixels allowed to differ by more than the tolerance (edge rounding
 /// between rasterizers), as a fraction of all pixels.
 const MAX_DIFFERING_FRACTION: f64 = 0.005;
