@@ -1,0 +1,30 @@
+[package]
+name = "riglet-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+riglet-format = { path = "../crates/riglet-format" }
+serde_json = "1.0.154"
+
+# Not part of the main workspace: cargo-fuzz needs nightly.
+[workspace]
+
+[[bin]]
+name = "package"
+path = "fuzz_targets/package.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "model_json"
+path = "fuzz_targets/model_json.rs"
+test = false
+doc = false
+bench = false
