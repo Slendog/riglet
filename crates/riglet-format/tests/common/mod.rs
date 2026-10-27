@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use riglet_format::buffer::BufferWriter;
 use riglet_format::model::*;
-use riglet_format::{Document, Frame, Limits, ParamValues, Rig, evaluate};
+use riglet_format::{Document, EvalOutput, Limits, ParamValues, Rig};
 
 /// Valid 1x1 RGBA PNG.
 pub const PNG_1X1: [u8; 70] = [
@@ -222,16 +222,18 @@ impl Builder {
 }
 
 /// Evaluates with the given parameter values (all others at default).
-pub fn eval(rig: &Rig, values: &[(&str, [f32; 2])]) -> Frame {
+pub fn eval(rig: &Rig, values: &[(&str, [f32; 2])]) -> EvalOutput {
     let mut params = ParamValues::defaults(rig);
     for (id, v) in values {
         assert!(params.set(rig, id, *v), "unknown parameter {id}");
     }
-    evaluate(rig, &params)
+    let mut out = EvalOutput::new();
+    rig.evaluate(&params, &mut out);
+    out
 }
 
 /// Model-space positions of drawable `id` in `frame`.
-pub fn positions(rig: &Rig, frame: &Frame, id: &str) -> Vec<Vec2> {
+pub fn positions(rig: &Rig, out: &EvalOutput, id: &str) -> Vec<Vec2> {
     let index = rig.node_index(id).expect("node exists");
-    frame.drawables.iter().find(|d| d.node == index).expect("drawable in frame").positions.clone()
+    out.drawable(index).expect("drawable in output").positions.clone()
 }

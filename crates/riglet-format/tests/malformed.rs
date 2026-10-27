@@ -5,7 +5,7 @@
 mod common;
 
 use common::*;
-use riglet_format::{Document, Limits, ParamValues, Rig, evaluate, read_package_bytes, write_package_bytes};
+use riglet_format::{Document, EvalOutput, Limits, ParamValues, Rig, read_package_bytes, write_package_bytes};
 
 /// Deterministic xorshift64 so failures reproduce.
 struct Rng(u64);
@@ -48,11 +48,12 @@ fn exercise(bytes: &[u8]) {
 fn exercise_doc(doc: &Document) {
     if let Ok(rig) = Rig::prepare(doc, &Limits::default()) {
         let mut params = ParamValues::defaults(&rig);
+        let mut out = EvalOutput::new();
         for v in [f32::NAN, f32::INFINITY, -1e30, 0.5, 1e30] {
             for p in params.values.iter_mut() {
                 *p = [v, -v];
             }
-            let _ = evaluate(&rig, &params);
+            rig.evaluate(&params, &mut out);
         }
     }
 }
@@ -139,5 +140,21 @@ fn deep_tree_does_not_overflow_the_stack() {
     }
     b.drawable("d", &parent, &[[0.0, 0.0]]);
     let rig = b.rig();
-    assert_eq!(evaluate(&rig, &ParamValues::defaults(&rig)).drawables.len(), 1);
+    let mut out = EvalOutput::new();
+    rig.evaluate(&ParamValues::defaults(&rig), &mut out);
+    assert_eq!(out.drawables.len(), 1);
+}
+
+/// Writes fuzz corpus seeds: `cargo test --test malformed -- --ignored`.
+#[test]
+#[ignore = "writes fuzz/seeds; run manually when the format changes"]
+fn write_fuzz_seeds() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/seeds");
+    let doc = sample();
+    std::fs::create_dir_all(root.join("package")).unwrap();
+    std::fs::create_dir_all(root.join("model_json")).unwrap();
+    std::fs::write(root.join("package/sample.riglet"), write_package_bytes(&doc).unwrap()).unwrap();
+    std::fs::write(root.join("model_json/sample.json"), serde_json::to_vec_pretty(&doc.model).unwrap()).unwrap();
+    // The model_json target pairs every input with these package files.
+    std::fs::write(root.join("data.bin"), &doc.files["buffers/data.bin"]).unwrap();
 }

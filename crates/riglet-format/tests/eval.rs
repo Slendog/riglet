@@ -223,7 +223,7 @@ fn crossing_draw_order() -> Builder {
 
 fn order(b: &Builder, p: f32) -> Vec<String> {
     let rig = b.rig();
-    eval(&rig, &[("p", [p, 0.0])]).drawables.iter().map(|d| rig.nodes[d.node].id.clone()).collect()
+    eval(&rig, &[("p", [p, 0.0])]).in_draw_order().map(|d| rig.nodes[d.node].id.clone()).collect()
 }
 
 #[test]
@@ -237,7 +237,7 @@ fn draw_order_uses_nearest_key_not_interpolation() {
     let rig = b.rig();
     let a = rig.node_index("a").unwrap();
     let frame = eval(&rig, &[("p", [0.6, 0.0])]);
-    assert_close_f(frame.drawables.iter().find(|d| d.node == a).unwrap().draw_order, 10.0);
+    assert_close_f(frame.drawable(a).unwrap().draw_order, 10.0);
 }
 
 #[test]
@@ -248,7 +248,8 @@ fn draw_order_ties_break_by_tree_pre_order() {
     b.drawable("early", "g", &[[0.0, 0.0]]);
     // Tree order: root, g, early, late (g is listed before late).
     let rig = b.rig();
-    let ids: Vec<&str> = eval(&rig, &[]).drawables.iter().map(|d| rig.nodes[d.node].id.as_str()).collect();
+    let out = eval(&rig, &[]);
+    let ids: Vec<&str> = out.in_draw_order().map(|d| rig.nodes[d.node].id.as_str()).collect();
     assert_eq!(ids, ["early", "late"]);
 }
 
@@ -495,4 +496,37 @@ fn rotation_under_mesh_deformer_follows_triangle() {
     let rig = b.rig();
     // Origin (20,10) -> (-10,20); child offset (10,0) rotated -> (0,10).
     assert_close(positions(&rig, &eval(&rig, &[("p", [1.0, 0.0])]), "d")[0], [-10.0, 30.0]);
+}
+
+// ---------- EvalOutput reuse ----------
+
+#[test]
+fn eval_output_is_reused_across_frames() {
+    let mut b = Builder::new();
+    b.param("p", 0.0, 1.0, 0.0);
+    b.warp("w", "root", 1, 1, &SQUARE);
+    b.drawable("d", "w", &[[0.25, 0.5], [0.5, 0.5], [0.75, 0.5]]);
+    b.drawable("e", "root", &[[1.0, 1.0]]);
+    let kfs = vec![b.positions(&[[0.0, 0.0]; 3]), b.positions(&[[0.1, 0.0]; 3])];
+    b.set("d", &[linear("p", &[0.0, 1.0])], kfs);
+    let rig = b.rig();
+
+    let mut params = riglet_format::ParamValues::defaults(&rig);
+    let mut out = riglet_format::EvalOutput::new();
+    rig.evaluate(&params, &mut out);
+    let first = out.drawables.clone();
+    let buffer = out.drawables[0].positions.as_ptr();
+
+    params.set(&rig, "p", [1.0, 0.0]);
+    rig.evaluate(&params, &mut out);
+    assert_eq!(out.drawables[0].positions.as_ptr(), buffer, "positions buffer was reallocated");
+    assert_close(out.drawables[0].positions[0], [35.0, 50.0]);
+
+    // Same input again gives the same output as a fresh EvalOutput.
+    params.set(&rig, "p", [0.0, 0.0]);
+    rig.evaluate(&params, &mut out);
+    assert_eq!(out.drawables, first);
+    // Slots are stable and in pre-order.
+    let ids: Vec<&str> = out.drawables.iter().map(|d| rig.nodes[d.node].id.as_str()).collect();
+    assert_eq!(ids, ["d", "e"]);
 }

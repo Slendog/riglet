@@ -138,38 +138,6 @@ pub fn triangle_jacobian(rest: [Vec2; 3], current: [Vec2; 3]) -> Option<Mat2> {
     Some(mul_mat(c, inverse(r)?))
 }
 
-fn segment_distance_sq(p: Vec2, a: Vec2, b: Vec2) -> f32 {
-    let ab = sub(b, a);
-    let len_sq = dot(ab, ab);
-    let t = if len_sq > 0.0 { (dot(sub(p, a), ab) / len_sq).clamp(0.0, 1.0) } else { 0.0 };
-    let d = sub(p, add(a, scale(ab, t)));
-    dot(d, d)
-}
-
-/// Barycentric tolerance for "on an edge counts as inside".
-const INSIDE_EPSILON: f32 = 1e-6;
-
-/// Triangle a point binds to (E6): the lowest-index triangle containing it,
-/// else the nearest triangle (ties go to the lowest index).
-pub fn bind_point(points: &[Vec2], indices: &[u32], p: Vec2) -> u32 {
-    let count = indices.len() / 3;
-    let mut best = (0usize, f32::INFINITY);
-    for tri in 0..count {
-        let t = triangle(points, indices, tri);
-        let Some(l) = barycentric(t, p) else { continue };
-        if l.iter().all(|&x| x >= -INSIDE_EPSILON) {
-            return tri as u32;
-        }
-        let d = segment_distance_sq(p, t[0], t[1])
-            .min(segment_distance_sq(p, t[1], t[2]))
-            .min(segment_distance_sq(p, t[2], t[0]));
-        if d < best.1 {
-            best = (tri, d);
-        }
-    }
-    best.0 as u32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,16 +178,5 @@ mod tests {
         let (b, _) = warp(&pts, 1, 1, [uv[0] - h, uv[1]]);
         let fd = scale(sub(a, b), 0.5 / h);
         assert!((fd[0] - j[0][0]).abs() < 1e-2 && (fd[1] - j[0][1]).abs() < 1e-2);
-    }
-
-    #[test]
-    fn bind_prefers_lowest_index_on_shared_edge() {
-        // Two triangles sharing the edge (1,0)-(0,1).
-        let pts = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
-        let idx = [1, 3, 2, 0, 1, 2];
-        assert_eq!(bind_point(&pts, &idx, [0.5, 0.5]), 0);
-        assert_eq!(bind_point(&pts, &idx, [0.1, 0.1]), 1);
-        // Outside both: nearest is triangle 1 (closest to the origin corner).
-        assert_eq!(bind_point(&pts, &idx, [-1.0, -1.0]), 1);
     }
 }

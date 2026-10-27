@@ -17,6 +17,9 @@ pub struct Limits {
     pub max_keyform_vertices_total: u64,
     pub max_keyform_grid: u64,
     pub max_texture_dimension: u32,
+    /// Sum over mesh-deformer bindings of bound points × triangles. Caps
+    /// load time against adversarial meshes (proposed for spec v0.2.1).
+    pub max_mesh_binding_pairs: u64,
 }
 
 const MIB: u64 = 1024 * 1024;
@@ -35,6 +38,7 @@ impl Default for Limits {
             max_keyform_vertices_total: 33_554_432,
             max_keyform_grid: 65_536,
             max_texture_dimension: 16_384,
+            max_mesh_binding_pairs: 1 << 28,
         }
     }
 }

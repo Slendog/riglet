@@ -1,8 +1,10 @@
 //! Rig evaluator: parameter values -> deformed vertices, opacity and draw
 //! order (spec E1–E7).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
+use crate::bind::TriangleGrid;
 use crate::geometry::{self, Mat2};
 use crate::model::{AxisInterpolation, Rgb, Vec2};
 use crate::rig::{Rig, RigKind, RigNode, RigParam, RigSet};
@@ -42,8 +44,9 @@ impl ParamValues {
 }
 
 /// Evaluated state of one drawable, in model space.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct DrawableFrame {
+    /// Node index in [`Rig::nodes`].
     pub node: usize,
     pub positions: Vec<Vec2>,
     /// Effective opacity (own × ancestors), E4.
@@ -51,14 +54,45 @@ pub struct DrawableFrame {
     pub draw_order: f32,
     pub multiply_color: Rgb,
     pub screen_color: Rgb,
-    /// False when the node or any ancestor is hidden.
+    /// False when the node or any ancestor is hidden (model visibility).
     pub visible: bool,
 }
 
-/// One evaluated frame. `drawables` is in draw order, bottom first (E4).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Frame {
+/// Caller-owned evaluation output. Reuse one per rig across frames: buffers
+/// keep their capacity, so steady-state evaluation reuses allocations.
+#[derive(Debug, Clone, Default)]
+pub struct EvalOutput {
+    /// One entry per drawable, in node pre-order. The slot for a drawable
+    /// never changes for a given rig, so renderers can key GPU buffers on it.
     pub drawables: Vec<DrawableFrame>,
+    /// Indices into `drawables`, bottom first (E4).
+    pub draw_order: Vec<usize>,
+    scratch: Scratch,
+}
+
+impl EvalOutput {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Drawables in draw order, bottom first.
+    pub fn in_draw_order(&self) -> impl Iterator<Item = &DrawableFrame> {
+        self.draw_order.iter().filter_map(|&i| self.drawables.get(i))
+    }
+
+    /// The evaluated drawable for node `node`, if it is a drawable.
+    pub fn drawable(&self, node: usize) -> Option<&DrawableFrame> {
+        self.drawables.iter().find(|d| d.node == node)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct Scratch {
+    values: Vec<[f32; 2]>,
+    current: Vec<DeformerState>,
+    opacity: Vec<f32>,
+    visible: Vec<bool>,
+    accum: Accum,
 }
 
 /// E2: clamp, or wrap for repeat parameters. Non-finite input means default.
@@ -108,7 +142,7 @@ fn axis_position(keys: &[f32], v: f32, interpolation: AxisInterpolation) -> (usi
 }
 
 /// Sum of keyform deltas for one node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct Accum {
     positions: Vec<Vec2>,
     opacity: f32,
@@ -121,17 +155,12 @@ struct Accum {
 }
 
 impl Accum {
-    fn new(point_count: usize) -> Self {
-        Accum {
-            positions: vec![[0.0; 2]; point_count],
-            opacity: 0.0,
-            draw_order: 0.0,
-            angle: 0.0,
-            origin: [0.0; 2],
-            scale: 0.0,
-            multiply_color: [0.0; 3],
-            screen_color: [0.0; 3],
-        }
+    /// Zeroes every delta, keeping the positions buffer's capacity.
+    fn reset(&mut self, point_count: usize) {
+        let positions = std::mem::take(&mut self.positions);
+        *self = Accum { positions, ..Default::default() };
+        self.positions.clear();
+        self.positions.resize(point_count, [0.0; 2]);
     }
 }
 
@@ -195,8 +224,8 @@ fn eval_set(set: &RigSet, values: &[[f32; 2]], acc: &mut Accum) {
 }
 
 /// Current (or rest) geometry of a deformer, in its parent space.
-#[derive(Debug, Clone, Default)]
-struct DeformerState {
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct DeformerState {
     points: Vec<Vec2>,
     origin: Vec2,
     angle: f32,
@@ -206,7 +235,9 @@ struct DeformerState {
 fn rest_state(node: &RigNode) -> DeformerState {
     match &node.kind {
         RigKind::Warp { points, .. } => DeformerState { points: points.clone(), ..Default::default() },
-        RigKind::MeshDeformer { positions, .. } => DeformerState { points: positions.clone(), ..Default::default() },
+        RigKind::MeshDeformer { positions, .. } | RigKind::Drawable { positions, .. } => {
+            DeformerState { points: positions.clone(), ..Default::default() }
+        }
         RigKind::Rotation { origin, angle, scale } => {
             DeformerState { origin: *origin, angle: *angle, scale: *scale, ..Default::default() }
         }
@@ -214,19 +245,45 @@ fn rest_state(node: &RigNode) -> DeformerState {
     }
 }
 
-enum BindMode<'a> {
-    Compute(&'a mut Bindings),
+enum BindMode<'a, 'g> {
+    Compute(&'a mut Binder<'g>),
     Lookup(&'a Bindings),
 }
 
-impl BindMode<'_> {
-    fn get(&mut self, key: (usize, usize), rest: &[Vec2], indices: &[u32], pts: &[Vec2]) -> Option<Vec<u32>> {
+/// Builds bindings at load, with one triangle grid per mesh deformer and a
+/// cap on total binding work (points × triangles).
+struct Binder<'g> {
+    bindings: Bindings,
+    grids: HashMap<usize, TriangleGrid>,
+    rest: &'g [DeformerState],
+    nodes: &'g [RigNode],
+    work: u64,
+    cap: u64,
+    exceeded: bool,
+}
+
+impl<'a> BindMode<'a, '_> {
+    /// Bound triangle per point of `pts` for the `(node, mesh deformer)` pair.
+    fn get(&mut self, key: (usize, usize), pts: &[Vec2]) -> Option<Cow<'a, [u32]>> {
         match self {
-            BindMode::Lookup(b) => b.get(&key).cloned(),
-            BindMode::Compute(b) => {
-                let tris: Vec<u32> = pts.iter().map(|&p| geometry::bind_point(rest, indices, p)).collect();
-                b.insert(key, tris.clone());
-                Some(tris)
+            BindMode::Lookup(b) => {
+                let b: &'a Bindings = b;
+                b.get(&key).map(|v| Cow::Borrowed(v.as_slice()))
+            }
+            BindMode::Compute(binder) => {
+                let mesh = key.1;
+                let RigKind::MeshDeformer { indices, .. } = &binder.nodes.get(mesh)?.kind else { return None };
+                let triangles = (indices.len() / 3) as u64;
+                binder.work = binder.work.saturating_add((pts.len() as u64).saturating_mul(triangles));
+                if binder.work > binder.cap {
+                    binder.exceeded = true;
+                    return None;
+                }
+                let rest = binder.rest.get(mesh).map_or(&[][..], |s| s.points.as_slice());
+                let grid = binder.grids.entry(mesh).or_insert_with(|| TriangleGrid::new(rest, indices));
+                let tris: Vec<u32> = pts.iter().map(|&p| grid.bind(p)).collect();
+                binder.bindings.insert(key, tris.clone());
+                Some(Cow::Owned(tris))
             }
         }
     }
@@ -250,7 +307,7 @@ fn map_up(
     rest: &[DeformerState],
     node: usize,
     pts: &mut [Vec2],
-    bind: &mut BindMode,
+    bind: &mut BindMode<'_, '_>,
 ) {
     let mut owner = nodes.get(node).and_then(|n| n.owner);
     while let Some(d) = owner {
@@ -265,8 +322,8 @@ fn map_up(
             }
             RigKind::MeshDeformer { indices, .. } => {
                 let rest_pts = rest_d.map_or(&[][..], |r| r.points.as_slice());
-                if let Some(tris) = bind.get((node, d), rest_pts, indices, pts) {
-                    for (p, &tri) in pts.iter_mut().zip(&tris) {
+                if let Some(tris) = bind.get((node, d), pts) {
+                    for (p, &tri) in pts.iter_mut().zip(tris.iter()) {
                         let tri = tri as usize;
                         let r = geometry::triangle(rest_pts, indices, tri);
                         let c = geometry::triangle(&cur.points, indices, tri);
@@ -289,7 +346,7 @@ fn map_up(
                     Some((m, mn @ RigNode { kind: RigKind::MeshDeformer { indices, .. }, .. })) => {
                         let cur_m = current.get(m).map_or(&[][..], |s| s.points.as_slice());
                         let rest_m = rest.get(m).map_or(&[][..], |s| s.points.as_slice());
-                        let tri = bind.get((d, m), rest_m, indices, &[cur.origin]).and_then(|t| t.first().copied());
+                        let tri = bind.get((d, m), &[cur.origin]).and_then(|t| t.first().copied());
                         match tri {
                             Some(tri) => {
                                 let r = geometry::triangle(rest_m, indices, tri as usize);
@@ -316,105 +373,124 @@ fn map_up(
     }
 }
 
+/// Rest geometry of every node, computed once per rig.
+pub(crate) fn rest_states(nodes: &[RigNode]) -> Vec<DeformerState> {
+    nodes.iter().map(rest_state).collect()
+}
+
+/// Binding work exceeded `Limits::max_mesh_binding_pairs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BindingLimitExceeded;
+
 /// Derives E6 bindings by walking every node's rest points up the tree at
 /// rest. At rest, mesh deformers are the identity, so the walk needs no
 /// bindings of its own.
-pub(crate) fn compute_bindings(nodes: &[RigNode]) -> Bindings {
-    let rest: Vec<DeformerState> = nodes.iter().map(rest_state).collect();
-    let mut bindings = Bindings::new();
+pub(crate) fn compute_bindings(
+    nodes: &[RigNode],
+    rest: &[DeformerState],
+    max_pairs: u64,
+) -> Result<Bindings, BindingLimitExceeded> {
     let has_mesh = nodes.iter().any(|n| matches!(n.kind, RigKind::MeshDeformer { .. }));
     if !has_mesh {
-        return bindings;
+        return Ok(Bindings::new());
     }
+    let mut binder = Binder {
+        bindings: Bindings::new(),
+        grids: HashMap::new(),
+        rest,
+        nodes,
+        work: 0,
+        cap: max_pairs,
+        exceeded: false,
+    };
     for (i, node) in nodes.iter().enumerate() {
         if let Some(mut pts) = node.kind.rest_points() {
-            map_up(nodes, &rest, &rest, i, &mut pts, &mut BindMode::Compute(&mut bindings));
+            map_up(nodes, rest, rest, i, &mut pts, &mut BindMode::Compute(&mut binder));
+            if binder.exceeded {
+                return Err(BindingLimitExceeded);
+            }
         }
     }
-    bindings
+    Ok(binder.bindings)
 }
 
-/// Evaluates the rig at `params` (E1–E7).
-pub fn evaluate(rig: &Rig, params: &ParamValues) -> Frame {
-    let values: Vec<[f32; 2]> = rig
-        .params
-        .iter()
-        .enumerate()
-        .map(|(i, p)| normalize(p, params.values.get(i).copied().unwrap_or(p.default)))
-        .collect();
-    let nodes = &rig.nodes;
-    let rest: Vec<DeformerState> = nodes.iter().map(rest_state).collect();
-    let mut current: Vec<DeformerState> = Vec::with_capacity(nodes.len());
-    let mut opacity: Vec<f32> = Vec::with_capacity(nodes.len());
-    let mut visible: Vec<bool> = Vec::with_capacity(nodes.len());
-    let mut drawables = Vec::new();
+impl Rig {
+    /// Evaluates the rig at `params` into `out` (E1–E7), reusing `out`'s
+    /// buffers. Parameters missing from `params` use their defaults.
+    pub fn evaluate(&self, params: &ParamValues, out: &mut EvalOutput) {
+        let nodes = &self.nodes;
+        let rest = &self.rest_states;
+        let Scratch { values, current, opacity, visible, accum } = &mut out.scratch;
 
-    for (i, node) in nodes.iter().enumerate() {
-        let rest_points = node.kind.rest_points().unwrap_or_default();
-        let mut acc = Accum::new(if matches!(node.kind, RigKind::Rotation { .. }) { 0 } else { rest_points.len() });
-        for set in &node.sets {
-            eval_set(set, &values, &mut acc);
-        }
+        values.clear();
+        values.extend(
+            self.params
+                .iter()
+                .enumerate()
+                .map(|(i, p)| normalize(p, params.values.get(i).copied().unwrap_or(p.default))),
+        );
+        current.resize_with(nodes.len(), DeformerState::default);
+        opacity.clear();
+        visible.clear();
+        out.drawables.resize_with(self.drawables.len(), DrawableFrame::default);
 
-        // Parents precede children in pre-order.
-        let (parent_opacity, parent_visible) = node
-            .parent
-            .map_or((1.0, true), |p| (opacity.get(p).copied().unwrap_or(1.0), visible.get(p).copied().unwrap_or(true)));
-        let own_opacity = (node.opacity + acc.opacity).clamp(0.0, 1.0);
-        opacity.push(own_opacity * parent_opacity);
-        visible.push(node.visible && parent_visible);
+        let mut slot = 0usize;
+        for ((node, state), rest_state) in nodes.iter().zip(current.iter_mut()).zip(rest) {
+            let point_count = if matches!(node.kind, RigKind::Rotation { .. }) { 0 } else { rest_state.points.len() };
+            accum.reset(point_count);
+            for set in &node.sets {
+                eval_set(set, values, accum);
+            }
 
-        let points: Vec<Vec2> = if matches!(node.kind, RigKind::Rotation { .. }) {
-            Vec::new()
-        } else {
-            rest_points.iter().zip(&acc.positions).map(|(r, d)| geometry::add(*r, *d)).collect()
-        };
+            // Parents precede children in pre-order.
+            let (parent_opacity, parent_visible) = node.parent.map_or((1.0, true), |p| {
+                (opacity.get(p).copied().unwrap_or(1.0), visible.get(p).copied().unwrap_or(true))
+            });
+            let own_opacity = (node.opacity + accum.opacity).clamp(0.0, 1.0);
+            opacity.push(own_opacity * parent_opacity);
+            visible.push(node.visible && parent_visible);
 
-        let state = match &node.kind {
-            RigKind::Rotation { origin, angle, scale } => DeformerState {
-                points: Vec::new(),
-                origin: geometry::add(*origin, acc.origin),
-                angle: angle + acc.angle,
-                scale: (scale + acc.scale).max(MIN_SCALE),
-            },
-            RigKind::Drawable { draw_order, multiply_color, screen_color, .. } => {
+            state.points.clear();
+            state.points.extend(rest_state.points.iter().zip(&accum.positions).map(|(r, d)| geometry::add(*r, *d)));
+            state.origin = geometry::add(rest_state.origin, accum.origin);
+            state.angle = rest_state.angle + accum.angle;
+            state.scale = (rest_state.scale + accum.scale).max(MIN_SCALE);
+
+            if let RigKind::Drawable { draw_order, multiply_color, screen_color, .. } = &node.kind {
                 let clamp3 = |mut rest: Rgb, d: Rgb| {
                     for (r, d) in rest.iter_mut().zip(d) {
                         *r = (*r + d).clamp(0.0, 1.0);
                     }
                     rest
                 };
-                drawables.push((
-                    i,
-                    points.clone(),
-                    draw_order + acc.draw_order,
-                    clamp3(*multiply_color, acc.multiply_color),
-                    clamp3(*screen_color, acc.screen_color),
-                ));
-                DeformerState::default()
+                if let Some(frame) = out.drawables.get_mut(slot) {
+                    frame.draw_order = draw_order + accum.draw_order;
+                    frame.multiply_color = clamp3(*multiply_color, accum.multiply_color);
+                    frame.screen_color = clamp3(*screen_color, accum.screen_color);
+                }
+                slot += 1;
             }
-            _ => DeformerState { points, ..Default::default() },
-        };
-        current.push(state);
-    }
+        }
 
-    let mut bind = BindMode::Lookup(&rig.bindings);
-    let mut frames: Vec<DrawableFrame> = drawables
-        .into_iter()
-        .map(|(i, mut positions, draw_order, multiply_color, screen_color)| {
-            map_up(nodes, &current, &rest, i, &mut positions, &mut bind);
-            DrawableFrame {
-                node: i,
-                positions,
-                opacity: opacity.get(i).copied().unwrap_or(0.0),
-                draw_order,
-                multiply_color,
-                screen_color,
-                visible: visible.get(i).copied().unwrap_or(false),
+        let mut bind = BindMode::Lookup(&self.bindings);
+        for (frame, &node) in out.drawables.iter_mut().zip(&self.drawables) {
+            frame.node = node;
+            frame.opacity = opacity.get(node).copied().unwrap_or(0.0);
+            frame.visible = visible.get(node).copied().unwrap_or(false);
+            frame.positions.clear();
+            if let Some(state) = current.get(node) {
+                frame.positions.extend_from_slice(&state.points);
             }
-        })
-        .collect();
-    // Stable sort: drawables were collected in pre-order, which breaks ties.
-    frames.sort_by(|a, b| a.draw_order.total_cmp(&b.draw_order));
-    Frame { drawables: frames }
+            map_up(nodes, current, rest, node, &mut frame.positions, &mut bind);
+        }
+
+        // Stable sort over pre-order slots: ties keep tree order (E4).
+        out.draw_order.clear();
+        out.draw_order.extend(0..out.drawables.len());
+        let drawables = &out.drawables;
+        out.draw_order.sort_by(|&a, &b| {
+            let key = |i: usize| drawables.get(i).map_or(0.0, |d| d.draw_order);
+            key(a).total_cmp(&key(b))
+        });
+    }
 }

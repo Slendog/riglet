@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
 use crate::buffer::{self, BufferError};
-use crate::eval::{self, Bindings};
+use crate::eval::{self, Bindings, DeformerState};
 use crate::geometry;
 use crate::limits::Limits;
 use crate::migrate::{CURRENT_SCHEMA_VERSION, FORMAT_NAME};
@@ -139,9 +139,13 @@ pub struct Rig {
     pub params: Vec<RigParam>,
     pub nodes: Vec<RigNode>,
     pub textures: Vec<Id>,
+    /// Node indices of every drawable, in pre-order: the slots of
+    /// [`crate::EvalOutput::drawables`].
+    pub drawables: Vec<usize>,
     param_index: HashMap<Id, usize>,
     node_index: HashMap<Id, usize>,
     pub(crate) bindings: Bindings,
+    pub(crate) rest_states: Vec<DeformerState>,
 }
 
 impl Rig {
@@ -241,8 +245,25 @@ impl Validator<'_> {
         if !self.issues.is_empty() {
             return None;
         }
-        let bindings = eval::compute_bindings(&nodes);
-        Some(Rig { params, nodes, textures, param_index, node_index, bindings })
+        let rest_states = eval::rest_states(&nodes);
+        let Ok(bindings) = eval::compute_bindings(&nodes, &rest_states, self.limits.max_mesh_binding_pairs) else {
+            self.issue(
+                "LIMIT_MESH_BINDING",
+                None,
+                format!(
+                    "mesh-deformer binding needs more than {} point-triangle pairs",
+                    self.limits.max_mesh_binding_pairs
+                ),
+            );
+            return None;
+        };
+        let drawables = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| matches!(n.kind, RigKind::Drawable { .. }))
+            .map(|(i, _)| i)
+            .collect();
+        Some(Rig { params, nodes, textures, drawables, param_index, node_index, bindings, rest_states })
     }
 
     // ----- V1 -----
