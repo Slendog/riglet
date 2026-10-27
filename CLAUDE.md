@@ -20,7 +20,8 @@ sidecars).
   wgpu, egui/eframe (editor only), clap (CLI only), cargo-fuzz (dev tool).
   Ask before adding anything else that is large.
 - **Spec:** `docs/format/riglet-format-v0.2.ts` (TypeScript notation,
-  language-neutral; `schemaVersion` "0.2.0"). Its Evaluation (E*),
+  language-neutral; `schemaVersion` "0.2.1", versioning policy in its
+  header). Its Evaluation (E*),
   Validation (V*) and Limits sections are normative; cite rule IDs in code
   comments and tests. Rules marked PROVISIONAL may change after verification.
   Proposals and reasoning live in `docs/format/spec-changes.md`; open issues
@@ -54,9 +55,20 @@ depends on format + render + converters. Only the editor depends on egui.
    buffers/*.bin, textures/), schemaVersion + migration hook, rig evaluator.
    Unit tests for multilinear interpolation, additive sets, child coordinates
    under warp/rotation parents.
-2. CLI: `info`, `validate`, `render --params ... -o frame.png`.
+2. CLI: `info`, `validate`, `render --params ... -o frame.png`. Starts only
+   after CI is green on all platforms.
+   - `render` must work without a GPU: use wgpu's software fallback
+     (lavapipe/llvmpipe on Linux, WARP on Windows). Render tests skip with
+     a clear message when no adapter exists, instead of failing.
+   - Masks, composites and blend modes are new here: golden-image tests
+     need a synthetic fixture for each one.
+   - Decide whether a hidden drawable still acts as a mask source (spec E4,
+     PROVISIONAL).
 3. Inochi2D import/export with round-trip tests (import -> export -> import
    gives an equivalent model).
+   - Inochi2D allows children under Parts (spec V2 does not): restructure
+     without loss (insert a group, keep transforms), with a round-trip test.
+   - Convert non-PNG textures (TGA, BC7, ...) to PNG.
 4. Minimal editor: viewport, node tree, parameter sliders, live preview.
 5. Live2D JSON sidecars (model3, physics3, motion3, exp3, cdi3), implemented
    from observed files.
@@ -87,9 +99,12 @@ depends on format + render + converters. Only the editor depends on egui.
 
 ## Cross-platform rules
 
-- **CI matrix:** `ubuntu-latest`, `macos-latest`, `windows-latest` run build,
-  test, clippy, and fmt on every push (GitHub Actions, added with the M1
-  workspace). A change is not done until all three pass.
+- **CI matrix:** `ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-latest` (arm64),
+  `macos-15-intel`, `windows-latest`, `windows-11-arm` run fmt, clippy and
+  tests on every push. A change is not done until all of them pass. If a
+  runner becomes unavailable, report it; never drop a job silently.
+  `macos-15-intel` is GitHub's last Intel image (announced until about
+  August 2027).
 - **Paths:** use `std::path::Path`/`PathBuf` for OS paths, never string
   concatenation with `/` or `\`. Paths *inside* packages (ZIP entries,
   `BufferRef.file`, texture files) are always `/`-separated and relative;
@@ -125,9 +140,16 @@ cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
-cargo +nightly fuzz run package      # from the repo root; targets in fuzz/fuzz_targets/
-cargo +nightly fuzz run model_json
+cargo test --release -p riglet-format --test binding -- --ignored   # worst-case binding time
+# Fuzz from the repo root; corpus/ is gitignored, seeds/ is committed.
+cargo +nightly fuzz run package fuzz/corpus/package fuzz/seeds/package -- -timeout=10 -max_len=16384
+cargo +nightly fuzz run model_json fuzz/corpus/model_json fuzz/seeds/model_json -- -timeout=10 -max_len=16384
+cargo test --test malformed -- --ignored write_fuzz_seeds          # regenerate seeds after format changes
 ```
+
+Fuzz crashes become regression tests in
+`crates/riglet-format/tests/malformed.rs` (input under
+`crates/riglet-format/tests/regressions/`), not just corpus files.
 
 `fuzz/` is its own Cargo workspace (it needs nightly), so `--workspace`
 commands skip it. Check that it still compiles with
@@ -143,10 +165,17 @@ commands skip it. Check that it still compiles with
 - Cite spec rule IDs (E*, V*) in comments next to the code that implements
   them. Validation issue codes (`V5_KEYS`, `LIMIT_NODES`, ...) are stable:
   never rename one, only add new ones.
+- Evaluator API: `rig.evaluate(&params, &mut EvalOutput)`. Callers keep one
+  `EvalOutput` per rig and reuse it every frame. `EvalOutput::drawables`
+  slots are stable (node pre-order); `draw_order` lists slots bottom first.
+- Untrusted input must not make loading slow either: any work that grows
+  faster than linear in input size needs a cap or an index (see `bind.rs`
+  and `Limits::max_mesh_binding_pairs`), plus an adversarial timing test.
 - `riglet-format` layout: `model` (serde types, on-disk shape only),
   `package` (ZIP I/O + limits), `migrate`, `buffer`, `rig` (validation ->
   prepared `Rig` with indices instead of IDs), `eval` (evaluator),
-  `geometry` (warp/rotation/triangle math).
+  `geometry` (warp/rotation/triangle math), `bind` (mesh-deformer binding
+  grid).
 - Tests: unit tests next to the code; integration tests in
   `crates/riglet-format/tests/` build synthetic models with
   `tests/common/mod.rs` (`Builder`). Malformed-input smoke tests

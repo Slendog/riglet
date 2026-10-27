@@ -13,11 +13,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # x86_64 and arm64 on all three platforms where runners exist.
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        # x86_64 and arm64 on every platform. Linux is pinned to 24.04
+        # (ubuntu-latest is moving to 26.04) so Mesa stays fixed for the
+        # M2 render tests. macos-15-intel is GitHub's last Intel image,
+        # announced as available until about August 2027.
+        os:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+          - macos-latest
+          - macos-15-intel
+          - windows-latest
+          - windows-11-arm
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -25,16 +34,19 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # Worst-case mesh-deformer binding at the default cap must stay fast.
+      - run: cargo test --release -p riglet-format --test binding -- --ignored
 
   fuzz:
     name: fuzz (short run)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fuzz
       - run: cargo install cargo-fuzz --locked
-      - run: cargo fuzz run package -- -max_total_time=60
-      - run: cargo fuzz run model_json -- -max_total_time=60
+      - run: cargo check --manifest-path fuzz/Cargo.toml
+      - run: cargo fuzz run package fuzz/seeds/package -- -max_total_time=60 -timeout=10 -max_len=16384
+      - run: cargo fuzz run model_json fuzz/seeds/model_json -- -max_total_time=60 -timeout=10 -max_len=16384
