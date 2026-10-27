@@ -1,8 +1,9 @@
-//! `riglet`: inspect, validate and render `.riglet` packages.
+//! `riglet`: inspect, validate, render and import `.riglet` packages.
 //!
 //! Exit codes (stable, documented in `riglet --help`):
 //!   0  OK
-//!   1  the file is invalid (validation issues, or not a readable package)
+//!   1  the file is invalid (validation issues, not a readable package, or
+//!      an Inochi2D file that can't be imported)
 //!   2  error: I/O, no GPU adapter, bad arguments
 //!
 //! Arguments are treated as untrusted input (the CLI may run behind a web
@@ -12,7 +13,7 @@
 mod params;
 
 use std::fs::File;
-use std::io::{BufReader, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -31,8 +32,8 @@ const EXIT_ERROR: u8 = 2;
 #[command(
     name = "riglet",
     version,
-    about = "Inspect, validate and render .riglet rig packages",
-    after_help = "Exit codes: 0 = OK, 1 = the file is invalid (validation issues), \
+    about = "Inspect, validate, render and import .riglet rig packages",
+    after_help = "Exit codes: 0 = OK, 1 = the file is invalid (validation issues, or not importable), \
                   2 = error (I/O, no GPU adapter, bad arguments)."
 )]
 struct Cli {
@@ -78,6 +79,17 @@ enum Command {
         #[arg(long)]
         software: bool,
     },
+    /// Convert an Inochi2D puppet (`.inp`) or project (`.inx`) to a package.
+    /// Every lossy step is listed as a warning with a stable code.
+    Import {
+        file: PathBuf,
+        /// Output `.riglet` path.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Print the warnings as JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// A failure with its exit code.
@@ -110,6 +122,7 @@ fn main() -> ExitCode {
         Command::Render { file, output, params, scale, background, software } => {
             render(&file, &output, &params, scale, background.as_deref(), software)
         }
+        Command::Import { file, output, json } => import(&file, &output, json),
     };
     match result {
         Ok(code) => ExitCode::from(code),
@@ -336,5 +349,38 @@ fn render(
         image.height,
         renderer.adapter().name
     );
+    Ok(EXIT_OK)
+}
+
+fn import(path: &Path, output: &Path, json: bool) -> Result<u8, Failure> {
+    let options = riglet_inochi2d::Options {
+        inx: path.extension().is_some_and(|e| e.eq_ignore_ascii_case("inx")),
+        ..Default::default()
+    };
+    // Read at most one byte past the cap, so an oversized file is rejected
+    // by the importer without being read whole.
+    let cap = options.limits.zip_max_total_uncompressed;
+    let file = File::open(path).map_err(|e| error(format!("cannot open {}: {e}", path.display())))?;
+    let mut bytes = Vec::new();
+    file.take(cap.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| error(format!("cannot read {}: {e}", path.display())))?;
+    let imported = riglet_inochi2d::import(&bytes, &options)
+        .map_err(|e| invalid(format!("{}: {} ({})", path.display(), e, e.code())))?;
+    let package = riglet_format::write_package_bytes(&imported.document)
+        .map_err(|e| error(format!("cannot write {}: {e}", output.display())))?;
+    std::fs::write(output, package).map_err(|e| error(format!("cannot write {}: {e}", output.display())))?;
+    let warnings = &imported.warnings;
+    if json {
+        print_json(&serde_json::json!({ "output": output.display().to_string(), "warnings": warnings }))?;
+    } else {
+        for w in warnings {
+            match &w.object_id {
+                Some(id) => println!("warning {} [{id}]: {}", w.code, w.message),
+                None => println!("warning {}: {}", w.code, w.message),
+            }
+        }
+        eprintln!("{} -> {}: {} warning(s)", path.display(), output.display(), warnings.len());
+    }
     Ok(EXIT_OK)
 }

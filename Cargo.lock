@@ -889,6 +889,7 @@ dependencies = [
  "clap",
  "riglet-fixtures",
  "riglet-format",
+ "riglet-inochi2d",
  "riglet-render",
  "serde",
  "serde_json",
@@ -912,6 +913,18 @@ dependencies = [
  "serde_json",
  "thiserror",
  "zip",
+]
+
+[[package]]
+name = "riglet-inochi2d"
+version = "0.1.0"
+dependencies = [
+ "png",
+ "riglet-fixtures",
+ "riglet-format",
+ "riglet-render",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

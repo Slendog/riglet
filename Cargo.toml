@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/riglet-format", "crates/riglet-render", "crates/riglet-fixtures", "crates/riglet-cli"]
+members = ["crates/riglet-format", "crates/riglet-render", "crates/riglet-fixtures", "crates/riglet-cli", "crates/riglet-inochi2d"]
 
 [workspace.package]
 version = "0.1.0"

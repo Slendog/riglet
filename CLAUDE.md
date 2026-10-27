@@ -38,7 +38,7 @@ crates/
   riglet-render/    wgpu renderer: evaluated frame -> pixels (window or offscreen)
   riglet-inochi2d/  .inp/.inx import/export
   riglet-live2d/    model3/physics3/motion3/exp3 JSON, moc3 module
-  riglet-cli/       info / validate / render (binary `riglet`)
+  riglet-cli/       info / validate / render / import (binary `riglet`)
   riglet-fixtures/  dev-only: model Builder + one render fixture per feature
   riglet-editor/    eframe app
 fuzz/               one fuzz target per importer
@@ -204,7 +204,14 @@ cargo test --release -p riglet-format --test binding -- --ignored   # worst-case
 cargo +nightly fuzz run package fuzz/corpus/package fuzz/seeds/package -- -timeout=10 -max_len=16384
 cargo +nightly fuzz run model_json fuzz/corpus/model_json fuzz/seeds/model_json -- -timeout=10 -max_len=16384
 cargo +nightly fuzz run texture_png fuzz/corpus/texture_png fuzz/seeds/texture_png -- -timeout=10 -max_len=65536
+cargo +nightly fuzz run inp_container fuzz/corpus/inp_container fuzz/seeds/inp_container -- -timeout=10 -max_len=65536
+cargo +nightly fuzz run inp_json fuzz/corpus/inp_json fuzz/seeds/inp_json -- -timeout=10 -max_len=16384
+cargo +nightly fuzz run tga fuzz/corpus/tga fuzz/seeds/tga -- -timeout=10 -max_len=65536
 cargo test --test malformed -- --ignored write_fuzz_seeds          # regenerate seeds after format changes
+cargo test -p riglet-inochi2d --test malformed -- --ignored        # regenerate Inochi2D seeds
+# Inochi2D sample models (testing_files_gitignored/inochi2d/): warning counts,
+# timing; RIGLET_SHOW_WARNINGS=CODE prints them, RIGLET_RENDER_DIR renders.
+cargo test --release -p riglet-inochi2d --test real_models -- --ignored --nocapture
 ```
 
 ## Fuzzing policy
@@ -222,8 +229,10 @@ cargo test --test malformed -- --ignored write_fuzz_seeds          # regenerate 
   more. Don't block on a running session.
 - **Every crash input, from any run, becomes a regular regression test:**
   put the file in `crates/riglet-format/tests/regressions/<target>/`
-  (package, model_json) or `crates/riglet-render/tests/regressions/texture_png/`,
-  in the same commit as the fix. `tests/regressions.rs` replays every file
+  (package, model_json), `crates/riglet-render/tests/regressions/texture_png/`
+  or `crates/riglet-inochi2d/tests/regressions/<target>/` (inp_container,
+  inp_json, tga), in the same commit as the fix. `tests/regressions.rs`
+  (`regressions()` in `tests/malformed.rs` for Inochi2D) replays every file
   through the same path as the fuzz target.
 
 `fuzz/` is its own Cargo workspace (it needs nightly), so `--workspace`
@@ -234,10 +243,12 @@ commands skip it. Check that it still compiles with
 
 - `riglet info FILE [--json]`, `riglet validate FILE [--json]`,
   `riglet render FILE -o OUT.png [-p NAME=VALUE]... [--scale S]
-  [--background RRGGBB] [--software]`.
+  [--background RRGGBB] [--software]`,
+  `riglet import FILE.inp|FILE.inx -o OUT.riglet [--json]` (prints every
+  `ConversionWarning`; warnings don't change the exit code).
 - **Exit codes (stable):** 0 = OK, 1 = the file is invalid (validation
-  issues, or not a readable package), 2 = error (I/O, no GPU adapter, bad
-  arguments).
+  issues, not a readable package, or an Inochi2D file that can't be
+  imported), 2 = error (I/O, no GPU adapter, bad arguments).
 - `-p NAME` matches a parameter id, name, Live2D id or Inochi2D id;
   `id:`, `name:`, `live2d:`, `inochi2d:` restrict it to one kind.
   Ambiguous matches are an error listing the candidates; never guess.

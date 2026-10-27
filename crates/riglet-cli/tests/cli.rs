@@ -229,3 +229,60 @@ fn rendering_an_invalid_file_exits_one() {
     assert_eq!(code(&out), 1);
     assert!(text(&out.stdout).contains("V4_PARAM_RANGE"));
 }
+
+/// The committed fuzz seed: a small puppet using most importer features.
+const INOCHI_SEED: &[u8] = include_bytes!("../../../fuzz/seeds/inp_container/rich.inp");
+
+#[test]
+fn import_writes_a_valid_package() {
+    let dir = scratch("import");
+    let input = dir.join("puppet.inp");
+    std::fs::write(&input, INOCHI_SEED).unwrap();
+    let output = dir.join("puppet.riglet");
+    let out = riglet(&["import", input.to_str().unwrap(), "-o", output.to_str().unwrap()]);
+    assert_eq!(code(&out), 0, "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("warning(s)"));
+    for line in text(&out.stdout).lines() {
+        assert!(line.starts_with("warning "), "unexpected output line: {line}");
+    }
+    let validated = riglet(&["validate", output.to_str().unwrap()]);
+    assert_eq!(code(&validated), 0, "{}", text(&validated.stdout));
+
+    let out = riglet(&["import", input.to_str().unwrap(), "-o", output.to_str().unwrap(), "--json"]);
+    assert_eq!(code(&out), 0, "{}", text(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let warnings = v["warnings"].as_array().unwrap();
+    assert!(warnings.iter().all(|w| w["code"].is_string() && w["message"].is_string()));
+}
+
+#[test]
+fn import_rejects_non_inochi_files() {
+    let dir = scratch("import_invalid");
+    let input = dir.join("not.inp");
+    std::fs::write(&input, b"definitely not a puppet").unwrap();
+    let output = dir.join("out.riglet");
+    let out = riglet(&["import", input.to_str().unwrap(), "-o", output.to_str().unwrap()]);
+    assert_eq!(code(&out), 1);
+    assert!(text(&out.stderr).contains("INP_NOT_INOCHI"), "{}", text(&out.stderr));
+    assert!(!output.exists());
+
+    std::fs::write(&input, b"TRNSRTS2").unwrap();
+    let out = riglet(&["import", input.to_str().unwrap(), "-o", output.to_str().unwrap()]);
+    assert_eq!(code(&out), 1);
+    assert!(text(&out.stderr).contains("INP2_UNSUPPORTED"), "{}", text(&out.stderr));
+}
+
+#[test]
+fn import_io_errors_exit_two() {
+    let dir = scratch("import_io");
+    let out = riglet(&["import", "/nonexistent/riglet/puppet.inp", "-o", "out.riglet"]);
+    assert_eq!(code(&out), 2);
+    assert!(text(&out.stderr).contains("cannot open"));
+
+    let input = dir.join("puppet.inp");
+    std::fs::write(&input, INOCHI_SEED).unwrap();
+    let output = dir.join("missing-dir").join("out.riglet");
+    let out = riglet(&["import", input.to_str().unwrap(), "-o", output.to_str().unwrap()]);
+    assert_eq!(code(&out), 2);
+    assert!(text(&out.stderr).contains("cannot write"));
+}

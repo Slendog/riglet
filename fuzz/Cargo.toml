@@ -11,6 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 riglet-format = { path = "../crates/riglet-format" }
 riglet-render = { path = "../crates/riglet-render" }
+riglet-inochi2d = { path = "../crates/riglet-inochi2d" }
 serde_json = "1.0.154"
 
 # Not part of the main workspace: cargo-fuzz needs nightly.
@@ -33,6 +34,27 @@ bench = false
 [[bin]]
 name = "texture_png"
 path = "fuzz_targets/texture_png.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "inp_container"
+path = "fuzz_targets/inp_container.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "inp_json"
+path = "fuzz_targets/inp_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tga"
+path = "fuzz_targets/tga.rs"
 test = false
 doc = false
 bench = false

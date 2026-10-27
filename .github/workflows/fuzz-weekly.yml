@@ -34,6 +34,9 @@ jobs:
           - { target: package, max_len: "16384" }
           - { target: model_json, max_len: "16384" }
           - { target: texture_png, max_len: "65536" }
+          - { target: inp_container, max_len: "65536" }
+          - { target: inp_json, max_len: "16384" }
+          - { target: tga, max_len: "65536" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install nightly --profile minimal
