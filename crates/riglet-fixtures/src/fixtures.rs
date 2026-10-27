@@ -140,14 +140,18 @@ pub fn all() -> Vec<Fixture> {
     }
 
     // R2: a non-premultiplied texture with soft alpha, and an asymmetric
-    // texture that shows any UV flip.
+    // texture that shows any UV flip. The ramp has exactly one texel per
+    // output pixel (44 texels over 44 pixels, texel centers on pixel
+    // centers), so it tests premultiplication, not the driver's bilinear
+    // weight precision: magnified ramps differed by up to 24/255 between
+    // adapters. Filtering is covered by uv_orientation.
     {
         let mut b = base();
         let mut ramp = Vec::new();
-        for x in 0..8u8 {
-            ramp.extend_from_slice(&[250, 200, 20, x * 36]);
+        for x in 0..44u32 {
+            ramp.extend_from_slice(&[250, 200, 20, (x * 255 / 43) as u8]);
         }
-        b.texture("ramp", 8, 1, &ramp, false);
+        b.texture("ramp", 44, 1, &ramp, false);
         b.quad("ramp", "root", "ramp", [-22.0, -18.0], [22.0, -2.0]);
         // The same colors stored premultiplied, flagged as such.
         let pre: Vec<u8> = ramp
@@ -158,7 +162,7 @@ pub fn all() -> Vec<Fixture> {
                 [p(c[0]), p(c[1]), p(c[2]), c[3]]
             })
             .collect();
-        b.texture("ramp_pre", 8, 1, &pre, true);
+        b.texture("ramp_pre", 44, 1, &pre, true);
         b.quad("ramp_pre", "root", "ramp_pre", [-22.0, 2.0], [22.0, 18.0]);
         out.push(fixture("texture_premultiply", b));
     }

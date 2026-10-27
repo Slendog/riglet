@@ -83,6 +83,8 @@ pub struct AdapterSummary {
     pub device_type: String,
     pub driver: String,
     pub max_texture_dimension: u32,
+    /// The device's `min_uniform_buffer_offset_alignment`.
+    pub uniform_offset_alignment: u32,
 }
 
 /// Output settings for one frame.
@@ -183,18 +185,22 @@ impl Renderer {
             .map_err(|e| RenderError::Device(e.to_string()))?;
         // GPU errors become RenderError via error scopes; never panic.
         device.on_uncaptured_error(std::sync::Arc::new(|_| {}));
+        // Use the DEVICE's limits, not a hardcoded 256: hardware differs
+        // (32 on llvmpipe, 256 on many GPUs) and so will WebGPU targets.
+        let device_limits = device.limits();
         let summary = AdapterSummary {
             name: info.name,
             backend: format!("{:?}", info.backend),
             device_type: format!("{:?}", info.device_type),
             driver: format!("{} {}", info.driver, info.driver_info).trim().to_owned(),
-            max_texture_dimension: limits.max_texture_dimension_2d,
+            max_texture_dimension: device_limits.max_texture_dimension_2d,
+            uniform_offset_alignment: device_limits.min_uniform_buffer_offset_alignment,
         };
         let pipelines = create_pipelines(&device);
         // Dynamic uniform offsets must be multiples of the device's
         // alignment (256 on many GPUs, 32 on llvmpipe): round the 48-byte
         // Draw struct up to the next multiple.
-        let align = u64::from(limits.min_uniform_buffer_offset_alignment).max(1);
+        let align = u64::from(device_limits.min_uniform_buffer_offset_alignment).max(1);
         let stride = DRAW_UNIFORM_BYTES.div_ceil(align) * align;
         Ok(Renderer { device, queue, summary, budgets: options.budgets, pipelines, draw_stride: stride })
     }
@@ -205,6 +211,12 @@ impl Renderer {
 
     pub fn budgets(&self) -> &Budgets {
         &self.budgets
+    }
+
+    /// Byte stride between per-draw uniforms: the 48-byte `Draw` struct
+    /// rounded up to the device's offset alignment.
+    pub fn uniform_stride(&self) -> u64 {
+        self.draw_stride
     }
 
     /// Uploads a rig's textures and static mesh data.

@@ -1,14 +1,17 @@
 //! Render tests: golden images for every fixture, readback at odd widths,
-//! and renderer budgets.
+//! uniform alignment, and renderer budgets.
 //!
-//! GPU availability: without an adapter these tests print `SKIPPED` and
-//! pass, unless `RIGLET_REQUIRE_GPU=1` (set on CI runners with a software
-//! adapter installed), where a missing adapter fails the test.
+//! Adapters: `RIGLET_REQUIRE_GPU=1` makes a missing adapter a failure (CI
+//! sets it on every runner not on the skip allow-list in CLAUDE.md).
+//! `RIGLET_EXPECT_BACKEND` (e.g. `Vulkan`, `Dx12`, `Metal`) and
+//! `RIGLET_EXPECT_ADAPTER` (substring of the adapter name) make a silent
+//! fallback to another backend or adapter a failure too. Without
+//! `RIGLET_REQUIRE_GPU`, a missing adapter prints `SKIPPED`.
 //!
-//! Goldens: `tests/goldens/<fixture>.png`, generated on the reference
-//! setup (lavapipe, Linux x86_64; see CLAUDE.md) with
-//! `RIGLET_UPDATE_GOLDENS=1`. Everywhere else they are compared with a
-//! per-channel tolerance plus a maximum number of differing pixels.
+//! Goldens: `tests/goldens/<fixture>.png`, from the reference setup
+//! (lavapipe, Linux x86_64). Regenerate only with
+//! `scripts/update-goldens.sh`. On mismatch, expected/actual/diff images
+//! are written to `target/tmp/render-failures/` (a CI artifact).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 
 use std::path::PathBuf;
@@ -17,24 +20,42 @@ use riglet_fixtures::fixtures;
 use riglet_format::{EvalOutput, Limits, ParamValues, Rig};
 use riglet_render::{Budgets, FrameOptions, Image, RenderError, Renderer, RendererOptions};
 
-/// Largest per-channel difference that still counts as equal. Bilinear
-/// filtering rounds differently between drivers (Metal vs lavapipe differ
-/// by up to 5 on soft alpha ramps); real errors (wrong premultiply, flipped
-/// UVs, wrong blend) differ by far more.
-const CHANNEL_TOLERANCE: u8 = 8;
-/// Pixels allowed to differ by more than the tolerance (edge rounding
-/// between rasterizers), as a fraction of all pixels.
-const MAX_DIFFERING_FRACTION: f64 = 0.005;
+/// Golden tolerance, two tiers, measured across six adapters (lavapipe
+/// x86_64 and arm64, WARP x86_64 and arm64, Metal on Apple silicon and on
+/// the Intel paravirtual device). With texel-aligned textures every
+/// fixture but one matched the lavapipe reference exactly; the remaining
+/// differences were at most 2 (composite_nested). The magnified filtered
+/// ramp, before it was made texel-aligned, differed by up to 24 between
+/// adapters, which is why fixtures avoid testing driver filtering
+/// precision beyond uv_orientation.
+mod tolerance {
+    /// Every pixel: no channel may differ by more than this.
+    pub const HARD: u8 = 8;
+    /// Most pixels: channels within this.
+    pub const SOFT: u8 = 2;
+    /// Pixels allowed between SOFT and HARD: this fraction of the image...
+    pub const SOFT_FRACTION: f64 = 0.005;
+    /// ...or this many, whichever is larger (small fixtures).
+    pub const SOFT_MIN_PIXELS: usize = 4;
+}
 
 fn renderer() -> Option<Renderer> {
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     match Renderer::new(RendererOptions::default()) {
         Ok(r) => {
             let a = r.adapter();
             eprintln!("render tests: adapter `{}` ({}, {}, {})", a.name, a.backend, a.device_type, a.driver);
+            if let Some(want) = env("RIGLET_EXPECT_BACKEND") {
+                assert_eq!(a.backend, want, "expected backend {want}, got {} (`{}`)", a.backend, a.name);
+            }
+            if let Some(want) = env("RIGLET_EXPECT_ADAPTER") {
+                let name = a.name.to_lowercase();
+                assert!(name.contains(&want.to_lowercase()), "expected adapter `{want}`, got `{}`", a.name);
+            }
             Some(r)
         }
         Err(e) => {
-            if std::env::var("RIGLET_REQUIRE_GPU").as_deref() == Ok("1") {
+            if env("RIGLET_REQUIRE_GPU").as_deref() == Some("1") {
                 panic!("RIGLET_REQUIRE_GPU=1 but no adapter: {e}");
             }
             eprintln!("render tests: SKIPPED, no GPU adapter ({e})");
@@ -63,30 +84,87 @@ fn render_fixture(r: &Renderer, f: &fixtures::Fixture) -> Image {
     riglet_render::render_document(r, &doc, &rig, &out, &FrameOptions::default()).unwrap()
 }
 
-/// `None` when equal within tolerance, else a description.
+/// Per-pixel largest channel difference.
+fn pixel_diffs(actual: &Image, golden: &Image) -> Vec<u8> {
+    actual
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(golden.rgba.as_chunks::<4>().0)
+        .map(|(a, g)| a.iter().zip(g).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0))
+        .collect()
+}
+
+/// `None` when within both tolerance tiers, else a description.
 fn compare(actual: &Image, golden: &Image) -> Option<String> {
+    use tolerance::*;
     if (actual.width, actual.height) != (golden.width, golden.height) {
         return Some(format!("size {}x{} vs golden {}x{}", actual.width, actual.height, golden.width, golden.height));
     }
-    let mut differing = 0usize;
-    let mut worst = 0u8;
-    for (a, g) in actual.rgba.as_chunks::<4>().0.iter().zip(golden.rgba.as_chunks::<4>().0) {
-        let d = a.iter().zip(g).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0);
-        worst = worst.max(d);
-        if d > CHANNEL_TOLERANCE {
-            differing += 1;
+    let diffs = pixel_diffs(actual, golden);
+    let worst = diffs.iter().copied().max().unwrap_or(0);
+    let over_hard = diffs.iter().filter(|&&d| d > HARD).count();
+    let over_soft = diffs.iter().filter(|&&d| d > SOFT).count();
+    let allowed = ((diffs.len() as f64 * SOFT_FRACTION).floor() as usize).max(SOFT_MIN_PIXELS);
+    if over_hard > 0 {
+        Some(format!("{over_hard} pixels differ by more than {HARD} (worst {worst})"))
+    } else if over_soft > allowed {
+        Some(format!("{over_soft} pixels differ by more than {SOFT} (allowed {allowed}, worst {worst})"))
+    } else {
+        None
+    }
+}
+
+/// Writes expected, actual and a diff heat map (black = equal, brighter
+/// red = larger difference, white = over the hard limit).
+fn write_failure(name: &str, actual: &Image, golden: Option<&Image>) -> PathBuf {
+    let dir = failures_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{name}.actual.png")), actual.to_png().unwrap()).unwrap();
+    if let Some(g) = golden {
+        std::fs::write(dir.join(format!("{name}.expected.png")), g.to_png().unwrap()).unwrap();
+        if (g.width, g.height) == (actual.width, actual.height) {
+            let rgba = pixel_diffs(actual, g)
+                .iter()
+                .flat_map(|&d| {
+                    if d > tolerance::HARD {
+                        [255, 255, 255, 255]
+                    } else {
+                        [(u32::from(d) * 255 / u32::from(tolerance::HARD)) as u8, 0, 0, 255]
+                    }
+                })
+                .collect();
+            let diff = Image { width: g.width, height: g.height, rgba };
+            std::fs::write(dir.join(format!("{name}.diff.png")), diff.to_png().unwrap()).unwrap();
         }
     }
-    let pixels = (actual.width * actual.height) as usize;
-    let allowed = (pixels as f64 * MAX_DIFFERING_FRACTION).floor() as usize;
-    (differing > allowed).then(|| {
-        format!("{differing} pixels differ by more than {CHANNEL_TOLERANCE} (allowed {allowed}, worst {worst})")
-    })
+    dir
+}
+
+#[test]
+fn tolerance_tiers() {
+    let img = |px: &[[u8; 4]]| Image { width: px.len() as u32, height: 1, rgba: px.concat() };
+    let base = vec![[100, 100, 100, 255]; 1000];
+    assert_eq!(compare(&img(&base), &img(&base)), None);
+    // Soft differences: up to 5 pixels (0.5% of 1000) may exceed 2.
+    let mut soft = base.clone();
+    for p in soft.iter_mut().take(5) {
+        p[0] = 106;
+    }
+    assert_eq!(compare(&img(&soft), &img(&base)), None);
+    soft[5][0] = 106;
+    assert!(compare(&img(&soft), &img(&base)).is_some());
+    // Any pixel over the hard limit fails, even just one.
+    let mut hard = base.clone();
+    hard[0][1] = 109;
+    assert!(compare(&img(&hard), &img(&base)).is_some());
 }
 
 #[test]
 fn goldens() {
     let Some(r) = renderer() else { return };
+    // Only scripts/update-goldens.sh and the goldens workflow set this.
     let update = std::env::var("RIGLET_UPDATE_GOLDENS").as_deref() == Ok("1");
     let mut failures = Vec::new();
     for f in fixtures::all() {
@@ -98,18 +176,28 @@ fn goldens() {
             continue;
         }
         let Ok(bytes) = std::fs::read(&path) else {
-            failures.push(format!("{}: no golden at {}", f.name, path.display()));
+            let dir = write_failure(f.name, &image, None);
+            failures.push(format!("{}: no golden at {} (actual in {})", f.name, path.display(), dir.display()));
             continue;
         };
         let golden = Image::from_png(&bytes).unwrap();
         if let Some(why) = compare(&image, &golden) {
-            std::fs::create_dir_all(failures_dir()).unwrap();
-            let actual = failures_dir().join(format!("{}.actual.png", f.name));
-            std::fs::write(&actual, image.to_png().unwrap()).unwrap();
-            failures.push(format!("{}: {why} (actual written to {})", f.name, actual.display()));
+            let dir = write_failure(f.name, &image, Some(&golden));
+            failures.push(format!("{}: {why} (expected/actual/diff in {})", f.name, dir.display()));
         }
     }
     assert!(failures.is_empty(), "golden mismatches on `{}`:\n{}", r.adapter().name, failures.join("\n"));
+}
+
+#[test]
+fn uniform_stride_follows_the_device_alignment() {
+    let Some(r) = renderer() else { return };
+    let align = u64::from(r.adapter().uniform_offset_alignment);
+    let stride = r.uniform_stride();
+    assert!(align > 0);
+    assert_eq!(stride % align, 0, "stride {stride} is not a multiple of the device alignment {align}");
+    assert!(stride >= 48, "stride {stride} is smaller than the Draw uniform");
+    assert!(stride < 48 + align, "stride {stride} is padded more than needed for alignment {align}");
 }
 
 /// A full-canvas opaque quad must read back exactly at any width, including

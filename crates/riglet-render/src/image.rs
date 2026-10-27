@@ -164,6 +164,44 @@ impl Image {
 mod tests {
     use super::*;
 
+    /// Independent oracle: round-to-nearest of the exact rational value.
+    /// For c * a / 255 an exact .5 can't occur (255 is odd), so there are
+    /// no ties to decide.
+    fn premultiply_oracle(c: u8, a: u8) -> u8 {
+        (f64::from(c) * f64::from(a) / 255.0 + 0.5).floor() as u8
+    }
+
+    /// Oracle for R8: round p * 255 / a, halves up, after p = min(p, a).
+    fn unpremultiply_oracle(p: u8, a: u8) -> u8 {
+        if a == 0 {
+            return 0;
+        }
+        let p = p.min(a);
+        (f64::from(p) * 255.0 / f64::from(a) + 0.5).floor().min(255.0) as u8
+    }
+
+    #[test]
+    fn premultiply_matches_oracle_for_every_pair() {
+        for c in 0..=255u8 {
+            for a in 0..=255u8 {
+                assert_eq!(premultiply_channel(c, a), premultiply_oracle(c, a), "c={c} a={a}");
+            }
+        }
+    }
+
+    #[test]
+    fn unpremultiply_matches_oracle_for_every_pair() {
+        // All 256 x 256 (premultiplied value, alpha) pairs, including the
+        // invalid p > a that additive blending produces (R4, R8).
+        for p in 0..=255u8 {
+            for a in 0..=255u8 {
+                let got = Image::from_premultiplied(1, 1, vec![p, p, p, a], None).rgba;
+                let want = unpremultiply_oracle(p, a);
+                assert_eq!(got, [want, want, want, a], "p={p} a={a}");
+            }
+        }
+    }
+
     #[test]
     fn premultiply_rounds_exactly() {
         assert_eq!(premultiply_channel(255, 255), 255);
