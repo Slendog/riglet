@@ -15,8 +15,10 @@ if [ "${1:-}" = "--staged" ]; then
     snapshot="$(mktemp -d)"
     trap 'rm -rf "$snapshot"' EXIT
     git checkout-index --all --prefix="$snapshot/"
-    # Share the build cache with the real tree to keep the hook fast.
-    export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}"
+    # A build cache of its own (kept between runs, so still incremental):
+    # sharing target/ with the real tree let cargo reuse test binaries
+    # whose env!("CARGO_MANIFEST_DIR") points into this deleted snapshot.
+    export CARGO_TARGET_DIR="${RIGLET_STAGED_TARGET_DIR:-$root/target/staged}"
     cd "$snapshot"
     printf '==> checking the staged snapshot in %s\n' "$snapshot"
 fi
