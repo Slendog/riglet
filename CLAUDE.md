@@ -70,6 +70,8 @@ depends on format + render + converters. Only the editor depends on egui.
    - Inochi2D allows children under Parts (spec V2 does not): restructure
      without loss (insert a group, keep transforms), with a round-trip test.
    - Convert non-PNG textures (TGA, BC7, ...) to PNG.
+   - Physics export waits for M5; parameter pairing and warp-deformer
+     export moved to M6.
 4. Minimal editor: viewport, node tree, parameter sliders, live preview.
 5. Physics: evaluate the format's `PhysicsRig` (parameters driven by
    simulated motion), with one model that covers both Inochi2D
@@ -81,7 +83,9 @@ depends on format + render + converters. Only the editor depends on egui.
      inputs and step count give bit-identical outputs on every platform, no
      wall-clock or frame-rate dependence), so it can be tested exactly.
 6. Live2D JSON sidecars (model3, physics3, motion3, exp3, cdi3), implemented
-   from observed files.
+   from observed files. Also the Inochi2D export items real Live2D models
+   test: pairing two 1D parameters into a 2D one, and warp deformers as
+   MeshGroups (designs in docs/design/m3-inochi2d.md).
 7. .moc3 reverse-engineering toolchain, then read-only importer, then exporter
    for one older moc3 version.
 
@@ -224,8 +228,9 @@ cargo test -p riglet-inochi2d --test malformed -- --ignored        # regenerate 
 cargo test --release -p riglet-inochi2d --test real_models -- --ignored --nocapture
 # ... against a test-only port of Inochi2D's vertex pipeline (pixel errors)
 cargo test --release -p riglet-inochi2d --test meshgroup_error -- --ignored --nocapture
-# ... import -> export -> import
+# ... import -> export -> import, plain and after edits
 cargo test --release -p riglet-inochi2d --test round_trip -- --ignored --nocapture
+cargo test --release -p riglet-inochi2d --test edit_round_trip -- --ignored --nocapture
 ```
 
 ## Fuzzing policy
@@ -259,7 +264,7 @@ commands skip it. Check that it still compiles with
   `riglet render FILE -o OUT.png [-p NAME=VALUE]... [--scale S]
   [--background RRGGBB] [--software]`,
   `riglet import FILE.inp|FILE.inx -o OUT.riglet [--json]`,
-  `riglet export FILE.riglet -o OUT.inp [--json]` (both print every
+  `riglet export FILE.riglet -o OUT.inp|OUT.inx [--json]` (both print every
   `ConversionWarning`; warnings don't change the exit code).
 - **Exit codes (stable):** 0 = OK, 1 = the file is invalid (validation
   issues, not a readable package, or an Inochi2D file that can't be

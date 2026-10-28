@@ -90,11 +90,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Convert a package to an Inochi2D puppet (`.inp`). Every lossy step
-    /// is listed as a warning with a stable code.
+    /// Convert a package to an Inochi2D puppet. Every lossy step is listed
+    /// as a warning with a stable code.
     Export {
         file: PathBuf,
-        /// Output `.inp` path.
+        /// Output path: `.inp` (puppet) or `.inx` (Inochi Creator project);
+        /// both use the same container.
         #[arg(short, long)]
         output: PathBuf,
         /// Print the warnings as JSON instead of text.

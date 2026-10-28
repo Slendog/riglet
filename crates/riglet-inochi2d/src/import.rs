@@ -1978,8 +1978,14 @@ pub fn import(bytes: &[u8], options: &Options) -> Result<Import, InochiError> {
     }
     let motions = motions(&json, &im.param_info, &mut im.warnings);
 
-    // Extension entries are kept verbatim as package files.
+    // Extension entries are kept verbatim as package files, except
+    // Riglet's own (export writes it fresh).
+    let mut riglet_entry: Option<Value> = None;
     for (name, payload) in c.extensions {
+        if name == crate::export::RIGLET_EXT {
+            riglet_entry = serde_json::from_slice(&payload).ok();
+            continue;
+        }
         let safe: String =
             name.chars().map(|ch| if ch.is_ascii_alphanumeric() || "._-".contains(ch) { ch } else { '_' }).collect();
         im.files.insert(format!("extensions/inochi2d/ext/{safe}"), payload);
@@ -2052,9 +2058,28 @@ pub fn import(bytes: &[u8], options: &Options) -> Result<Import, InochiError> {
         return Err(InochiError::Puppet("geometry is out of range (the canvas size overflows)".into()));
     }
     model.canvas = Canvas { width: size[0], height: size[1] };
+    // A Riglet export recorded the canvas and the ids of native nodes and
+    // parameters (org.riglet.model): restore them.
+    if let Some(r) = &riglet_entry {
+        let c = floats(r.get("canvas"));
+        if let [w, h] = c[..]
+            && w.is_finite()
+            && h.is_finite()
+            && w > 0.0
+            && h > 0.0
+        {
+            model.canvas = Canvas { width: w, height: h };
+        }
+        model = restore_ids(model, r);
+    }
 
     warnings.shrink_to_fit();
     let document = Document { manifest: manifest(warnings.clone()), model, files };
+    if riglet_entry.is_some() {
+        Rig::prepare(&document, limits).map_err(|issues| {
+            InochiError::InvalidResult(issues.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))
+        })?;
+    }
     Ok(Import { document, warnings })
 }
 
@@ -2108,6 +2133,62 @@ fn motions(json: &Value, params: &HashMap<u32, ParamInfo>, warnings: &mut Vec<Co
         });
     }
     out
+}
+
+/// Renames `inochi:<uuid>` nodes and parameters back to the Riglet ids an
+/// export recorded (org.riglet.model `nodeIds`, `parameterIds`): the
+/// node's outermost Riglet node (its rotation deformer if it has one) and
+/// every reference to it. Ids already in use are left alone.
+fn restore_ids(model: Model, entry: &Value) -> Model {
+    let mut rename: HashMap<String, String> = HashMap::new();
+    let taken: HashSet<String> = model.nodes.keys().chain(model.parameters.iter().map(|p| &p.id)).cloned().collect();
+    // Untrusted: every new id is used once and collides with nothing.
+    let mut used: HashSet<String> = HashSet::new();
+    let mut add = |old: String, new: &str| {
+        if !taken.contains(new) && !new.starts_with("inochi:") && !new.is_empty() && used.insert(new.to_owned()) {
+            rename.insert(old, new.to_owned());
+        }
+    };
+    for (u, id) in entry.get("nodeIds").and_then(Value::as_object).into_iter().flatten() {
+        let Some(id) = id.as_str() else { continue };
+        let transform = format!("inochi:{u}:transform");
+        let old = if model.nodes.contains_key(&transform) { transform } else { format!("inochi:{u}") };
+        if model.nodes.contains_key(&old) {
+            add(old, id);
+        }
+    }
+    for (u, id) in entry.get("parameterIds").and_then(Value::as_object).into_iter().flatten() {
+        if let Some(id) = id.as_str() {
+            add(format!("inochi:{u}"), id);
+        }
+    }
+    if rename.is_empty() {
+        return model;
+    }
+    fn walk(v: &mut Value, rename: &HashMap<String, String>) {
+        match v {
+            Value::String(s) => {
+                if let Some(n) = rename.get(s.as_str()) {
+                    *s = n.clone();
+                }
+            }
+            Value::Array(a) => a.iter_mut().for_each(|x| walk(x, rename)),
+            Value::Object(o) => {
+                let old = std::mem::take(o);
+                for (k, mut x) in old {
+                    // Names and recorded raw data are not references.
+                    if k != "name" && k != "extensions" {
+                        walk(&mut x, rename);
+                    }
+                    o.insert(rename.get(&k).cloned().unwrap_or(k), x);
+                }
+            }
+            _ => {}
+        }
+    }
+    let Ok(mut v) = serde_json::to_value(&model) else { return model };
+    walk(&mut v, &rename);
+    serde_json::from_value(v).unwrap_or(model)
 }
 
 #[cfg(test)]

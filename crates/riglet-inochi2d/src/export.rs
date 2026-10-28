@@ -28,6 +28,9 @@ pub struct Export {
     pub warnings: Vec<ConversionWarning>,
 }
 
+/// EXT_SECT entry with Riglet data Inochi2D ignores (canvas, ids).
+pub const RIGLET_EXT: &str = "org.riglet.model";
+
 /// Inochi2D's "no texture" slot value.
 const NO_TEXTURE: u64 = 4_294_967_295;
 
@@ -570,16 +573,15 @@ pub fn export(doc: &Document) -> Result<Export, InochiError> {
     ex.textures();
     ex.params();
     let mut nodes = ex.nodes(&rig)?;
+    ex.mesh_followers(&mut nodes);
     let params = ex.bindings(&mut nodes)?;
     let root = ex.tree(nodes);
 
     let model_ext = doc.model.extensions.as_ref().and_then(|e| e.get(EXT)).and_then(Value::as_object);
     let pick = |k: &str, d: Value| model_ext.and_then(|m| m.get(k)).cloned().unwrap_or(d);
-    if !doc.model.motions.is_empty() && model_ext.is_none_or(|m| !m.contains_key("animations")) {
-        ex.warn("MOTIONS_DROPPED", None, "motions aren't exported yet");
-    }
+    let animations = ex.animations(model_ext.and_then(|m| m.get("animations")));
     if !doc.model.physics.is_empty() {
-        ex.warn("PHYSICS_DROPPED", None, "physics rigs aren't exported yet");
+        ex.warn("PHYSICS_DROPPED", None, "physics export comes with M5 (physics)");
     }
     let puppet = json!({
         "meta": pick("meta", json!({"name": "", "version": "v0.8.7"})),
@@ -587,13 +589,20 @@ pub fn export(doc: &Document) -> Result<Export, InochiError> {
         "nodes": root,
         "param": params,
         "automation": pick("automation", json!([])),
-        "animations": pick("animations", json!({})),
+        "animations": animations,
     });
     let mut extensions = Vec::new();
     for (name, data) in doc.files.range("extensions/inochi2d/ext/".to_owned()..) {
         let Some(n) = name.strip_prefix("extensions/inochi2d/ext/") else { break };
-        extensions.push((n.to_owned(), data.clone()));
+        if n != RIGLET_EXT {
+            extensions.push((n.to_owned(), data.clone()));
+        }
     }
+    // What Inochi2D can't hold, for a later Riglet import (Inochi2D keeps
+    // unknown EXT_SECT entries on save, open question 6).
+    let riglet = ex.riglet_entry();
+    extensions
+        .push((RIGLET_EXT.to_owned(), serde_json::to_vec(&riglet).map_err(|e| InochiError::Json(e.to_string()))?));
     let json = serde_json::to_vec(&puppet).map_err(|e| InochiError::Json(e.to_string()))?;
     let bytes = container::write(&Container { json, textures: std::mem::take(&mut ex.textures), extensions })?;
     Ok(Export { bytes, warnings: ex.warnings })
@@ -1240,5 +1249,242 @@ fn remove_base(s: &Sample, base: &Sample, multiply: bool) -> Sample {
         scale_xy: arr(s.scale_xy, base.scale_xy, &op, miss),
         multiply_color: arr(s.multiply_color, base.multiply_color, &op, miss),
         screen_color: arr(s.screen_color, base.screen_color, &|a, b| a - b, 0.0),
+    }
+}
+
+// ---------- motions, mesh followers, the Riglet entry ----------
+
+impl Exporter<'_> {
+    /// Riglet motions as Inochi2D animations (frames at the recorded
+    /// timestep, else 1/60 s). Recorded fields Riglet doesn't model (lead
+    /// in/out, weight, additive, merge modes) are kept per animation and
+    /// lane.
+    fn animations(&mut self, recorded: Option<&Value>) -> Value {
+        let mut out = Map::new();
+        let param_uuid: HashMap<Id, u32> = self.params.iter().map(|(id, u, _)| (id.clone(), *u)).collect();
+        for m in &self.doc.model.motions {
+            let raw = recorded.and_then(|r| r.get(&m.name)).and_then(Value::as_object).cloned().unwrap_or_default();
+            let timestep =
+                raw.get("timestep").and_then(Value::as_f64).filter(|t| *t > 0.0).map_or(1.0 / 60.0, |t| t as f32);
+            let raw_lanes: Vec<Value> = raw.get("lanes").and_then(Value::as_array).cloned().unwrap_or_default();
+            let mut lanes = Vec::new();
+            let mut rounded = false;
+            for track in &m.tracks {
+                let MotionTarget::Param { param } = &track.target else {
+                    warn(
+                        &mut self.warnings,
+                        "MOTION_TARGET_DROPPED",
+                        Some(&m.id),
+                        format!("motion `{}`: Inochi2D animations only drive parameters", m.name),
+                    );
+                    continue;
+                };
+                let Some(&uuid) = param_uuid.get(&param.parameter) else { continue };
+                let interp = track.keys.first().map_or(CurveInterp::Linear, |k| k.interp);
+                let name = match interp {
+                    CurveInterp::Linear => "Linear",
+                    CurveInterp::Step => "Stepped",
+                    CurveInterp::InverseStep | CurveInterp::Bezier => {
+                        warn(
+                            &mut self.warnings,
+                            "ANIMATION_CURVE_APPROXIMATED",
+                            Some(&m.id),
+                            format!("motion `{}`: {interp:?} keys written as linear", m.name),
+                        );
+                        "Linear"
+                    }
+                };
+                if track.keys.iter().any(|k| k.interp != interp) {
+                    warn(
+                        &mut self.warnings,
+                        "ANIMATION_CURVE_APPROXIMATED",
+                        Some(&m.id),
+                        format!("motion `{}`: Inochi2D lanes have one interpolation; mixed keys use the first", m.name),
+                    );
+                }
+                let keyframes: Vec<Value> = track
+                    .keys
+                    .iter()
+                    .map(|k| {
+                        let f = k.t / timestep;
+                        rounded |= (f - f.round()).abs() > 1e-3;
+                        json!({"frame": f.round() as i64, "value": k.value, "tension": 0.5})
+                    })
+                    .collect();
+                let mut lane = raw_lanes
+                    .iter()
+                    .find(|l| {
+                        l.get("uuid").and_then(Value::as_u64) == Some(u64::from(uuid))
+                            && l.get("target").and_then(Value::as_u64).unwrap_or(0) == u64::from(param.component)
+                    })
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                lane.insert("interpolation".into(), name.into());
+                lane.insert("uuid".into(), uuid.into());
+                lane.insert("target".into(), param.component.into());
+                lane.insert("keyframes".into(), Value::Array(keyframes));
+                lanes.push(Value::Object(lane));
+            }
+            if rounded {
+                warn(
+                    &mut self.warnings,
+                    "ANIMATION_FRAME_ROUNDED",
+                    Some(&m.id),
+                    format!("motion `{}`: key times rounded to whole frames of {timestep} s", m.name),
+                );
+            }
+            let mut a = raw;
+            a.insert("timestep".into(), timestep.into());
+            a.insert("length".into(), ((m.duration / timestep).round() as i64).into());
+            a.entry("additive").or_insert(false.into());
+            a.entry("leadIn").or_insert(0.into());
+            a.entry("leadOut").or_insert(((m.duration / timestep).round() as i64).into());
+            a.entry("animationWeight").or_insert(1.0.into());
+            a.insert("lanes".into(), Value::Array(lanes));
+            out.insert(m.name.clone(), Value::Object(a));
+        }
+        Value::Object(out)
+    }
+
+    fn has_children(&self, u: u32) -> bool {
+        self.entries.values().any(|e| e.parent == Some(u))
+    }
+
+    /// The nearest deformer above a Riglet node (groups are transparent).
+    fn riglet_owner(&self, id: &str) -> Option<&Node> {
+        let mut cur = self.node(id)?.base().parent.clone();
+        while let Some(p) = cur {
+            match self.node(&p)? {
+                Node::Group(g) => cur = g.base.parent.clone(),
+                other => return Some(other),
+            }
+        }
+        None
+    }
+
+    /// Rotation deformers that follow a mesh deformer, in Inochi2D terms:
+    /// a part's transform is filtered per vertex (pointwise); a plain
+    /// node can only be translated, and only when its MeshGroup has
+    /// translate_children, which then applies to all its plain nodes.
+    fn mesh_followers(&mut self, nodes: &mut BTreeMap<u32, Map<String, Value>>) {
+        // Per MeshGroup entry: plain nodes that should follow, and plain
+        // nodes that must not (the importer moved them outside).
+        let mut want: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut forbid: HashMap<u32, usize> = HashMap::new();
+        let entries: Vec<Entry> = self.entries.values().cloned().collect();
+        let mesh_entry_of = |s: &Self, id: &str| s.owner_of.get(id).copied();
+        for e in &entries {
+            let is_part = e.drawable.is_some();
+            // The Inochi2D MeshGroup that would filter this node: walk up
+            // through parts (and propagating composites).
+            let mut reach = None;
+            let mut p = e.parent;
+            while let Some(u) = p {
+                let Some(pe) = self.entries.get(&u) else { break };
+                if pe.mesh.is_some() {
+                    reach = Some(u);
+                    break;
+                }
+                if pe.drawable.is_none() {
+                    break;
+                }
+                p = pe.parent;
+            }
+            let rot = e.transform.as_deref().and_then(|t| match self.node(t) {
+                Some(Node::Rotation(r)) => Some((t.to_owned(), r.mesh_parent.unwrap_or_default())),
+                _ => None,
+            });
+            let follows_mesh = rot.as_ref().and_then(|(t, _)| match self.riglet_owner(t) {
+                Some(Node::MeshDeformer(m)) => mesh_entry_of(self, &m.base.id),
+                Some(Node::Rotation(r)) if r.mesh_parent == Some(MeshParent::Pointwise) => {
+                    // translate inside a pointwise frame: the frame's MeshGroup
+                    self.riglet_owner(&r.base.id).and_then(|o| mesh_entry_of(self, &o.base().id))
+                }
+                _ => None,
+            });
+            match (rot, follows_mesh) {
+                (Some((t, mode)), Some(m)) => {
+                    if is_part {
+                        if mode != MeshParent::Pointwise {
+                            self.warn(
+                                "MESHGROUP_RIGID_APPROXIMATED",
+                                Some(&t),
+                                "Inochi2D deforms a part's vertices one by one under its MeshGroup (pointwise); \
+                                 this rotation deformer follows the mesh differently",
+                            );
+                        }
+                    } else {
+                        if mode != MeshParent::Translate {
+                            self.warn(
+                                "MESHGROUP_RIGID_APPROXIMATED",
+                                Some(&t),
+                                "Inochi2D can only translate a plain node with its MeshGroup; following the mesh's \
+                                 rotation and scale is dropped",
+                            );
+                        }
+                        want.entry(m).or_default().push(e.uuid);
+                    }
+                }
+                // A plain node that must not follow; only matters when it
+                // has children (translating an empty node shows nothing).
+                _ if !is_part && reach.is_some() && e.mesh.is_none() && self.has_children(e.uuid) => {
+                    if let Some(m) = reach {
+                        *forbid.entry(m).or_default() += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (m, nodes_wanting) in &want {
+            if forbid.get(m).copied().unwrap_or(0) > 0 {
+                for u in nodes_wanting {
+                    self.warn(
+                        "MESHGROUP_TRANSLATE_CONFLICT",
+                        self.entries.get(u).map(|e| e.outer.clone()).as_deref(),
+                        "this node should follow its MeshGroup but a sibling node must not; Inochi2D's \
+                         translate_children is per MeshGroup, so it stays put",
+                    );
+                }
+                if let Some(n) = nodes.get_mut(m) {
+                    n.insert("translate_children".into(), false.into());
+                }
+            } else if let Some(n) = nodes.get_mut(m) {
+                n.insert("translate_children".into(), true.into());
+            }
+        }
+        for m in forbid.keys() {
+            if !want.contains_key(m)
+                && let Some(n) = nodes.get_mut(m)
+            {
+                n.insert("translate_children".into(), false.into());
+            }
+        }
+    }
+
+    /// The org.riglet.model entry: schema version, canvas, and the ids of
+    /// Riglet nodes and parameters that aren't `inochi:<uuid>` (natives),
+    /// so a Riglet import restores them.
+    fn riglet_entry(&self) -> Value {
+        let mut node_ids = Map::new();
+        for e in self.entries.values() {
+            if !e.outer.starts_with("inochi:") {
+                node_ids.insert(e.uuid.to_string(), e.outer.clone().into());
+            }
+        }
+        let mut param_ids = Map::new();
+        for (id, u, _) in &self.params {
+            if !id.starts_with("inochi:") {
+                param_ids.insert(u.to_string(), id.clone().into());
+            }
+        }
+        let c = &self.doc.model.canvas;
+        json!({
+            "format": "riglet",
+            "schemaVersion": riglet_format::migrate::CURRENT_SCHEMA_VERSION,
+            "canvas": [c.width, c.height],
+            "nodeIds": node_ids,
+            "parameterIds": param_ids,
+        })
     }
 }

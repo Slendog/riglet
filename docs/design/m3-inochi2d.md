@@ -21,7 +21,7 @@ These override the sections below where they differ.
      1)`, `clamp(offsetOpacity * opacity, 0, 1)`; `part/package.d`
      l.207-281, 798-803). So `(rest + sum of additive) * product of
      multiplicative`, then clamp, reproduces it.
-3. **Multi-parameter sets on export:** first pair two 1D parameters into
+3. **Multi-parameter sets on export (DEFERRED to M6):** first pair two 1D parameters into
    one Inochi2D 2D parameter when a set has exactly two axes from two
    different 1D parameters (exact); greedy pairing; the default-anchored
    split with `KEYFORM_INTERACTION_DROPPED` only for what's left. Pairing is
@@ -298,7 +298,7 @@ Inochi2D has 19 modes. Riglet has normal, additive, multiply.
 | DrawableNode | Part (rebuilt with children when the import recorded it) | exact |
 | RotationDeformer under a group / rotation | Node with transform (trans = origin, rot.z = angle in radians, scale) | exact |
 | RotationDeformer under a warp | Node; Inochi2D has no warp frame | approx `ROTATION_UNDER_WARP` |
-| WarpDeformer | MeshGroup with the warp grid as triangles (piecewise affine instead of bilinear) | approx `WARP_AS_MESHGROUP` |
+| WarpDeformer (DEFERRED to M6; `WARP_UNSUPPORTED` until then) | MeshGroup with the warp grid as triangles (piecewise affine instead of bilinear) | approx `WARP_AS_MESHGROUP` |
 | MeshDeformer | MeshGroup (static) | exact for points inside the mesh |
 | Masks | clip -> Mask, invert -> DodgeMask, all Mask entries first (exact under the stencil); soft coverage becomes a binary threshold | approx `MASK_SOFTNESS_LOST` |
 | KeyformSet over one parameter (1 or 2 axes) | one binding per animated property | exact (linear and step axes; step -> Nearest with shifted keys is approx `STEP_AS_NEAREST`) |
@@ -322,7 +322,7 @@ dropped delta (in pixels or units), so a rigger can see whether it matters.
 Alternative: a least-squares additive fit (smaller average error, but not
 exact anywhere in particular). I recommend the default-anchored split.
 
-### 5b. Export status (first slice, `src/export.rs`)
+### 5b. Export status (`src/export.rs`)
 
 Done: node tree (with 5a), transforms (recorded values restored when the
 Riglet rotation still matches, else derived; x/y rotations fold into the
@@ -335,15 +335,28 @@ factors, opacity, tint/screen, zSort with the subtree rule), linear /
 cubic / Nearest (the importer's step shape is recognized, else
 `STEP_AS_NEAREST`), multi-parameter sets split through the defaults
 (`KEYFORM_INTERACTION_DROPPED`), EXT_SECT entries, recorded meta,
-physics, automation and animations. CLI `riglet export`. Fuzz target
-`inp_export`. Aka and Midori round-trip with no warnings (max 0.0005 px).
+physics settings and automation, motions from the Riglet data (recorded
+lane fields kept; `ANIMATION_FRAME_ROUNDED`, `ANIMATION_CURVE_APPROXIMATED`,
+`MOTION_TARGET_DROPPED`), rotation deformers under mesh deformers
+(pointwise parts and translate nodes exact; rigid ones approximated as
+translate with `MESHGROUP_RIGID_APPROXIMATED`; `translate_children` set
+per MeshGroup, `MESHGROUP_TRANSLATE_CONFLICT` when its nodes disagree),
+the `org.riglet.model` EXT_SECT entry (schema version, canvas, ids of
+native nodes and parameters; import restores them), `.inp` and `.inx`
+(same container). CLI `riglet export`. Fuzz target `inp_export`.
 
-Not yet: pairing two 1D parameters into a 2D one (section 0, item 3),
-warp deformers (`WARP_UNSUPPORTED`), native rigid rotation deformers under
-mesh deformers, motions written from Riglet data (`MOTIONS_DROPPED` when
-there are no recorded animations), physics (`PHYSICS_DROPPED`), the
-`org.riglet.model` EXT_SECT entry, `.inx` output, and the manual check in
-Inochi Creator / Session.
+Tests: round trips of synthetic puppets (`tests/round_trip.rs`) and of
+edited models (`tests/edit_round_trip.rs`: a transform, keyform values, a
+color, a mask, native nodes and a motion changed after import) evaluate
+the same after export and re-import; the same edits on Aka and Midori
+(ignored tests) round-trip within 0.0005 px.
+
+Physics export: `PHYSICS_DROPPED` until M5.
+
+**Deferred to M6** (real Live2D models will test them; design kept):
+pairing two 1D parameters into a 2D one (section 0, item 3; until then
+`KEYFORM_INTERACTION_DROPPED`), and warp deformer export (5, "WarpDeformer
+-> MeshGroup"; until then `WARP_UNSUPPORTED`).
 
 ### 5a. Export: undoing the importer's restructuring (added after the import review)
 
