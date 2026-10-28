@@ -1395,16 +1395,20 @@ impl Exporter<'_> {
                 Some(Node::Rotation(r)) => Some((t.to_owned(), r.mesh_parent.unwrap_or_default())),
                 _ => None,
             });
-            let follows_mesh = rot.as_ref().and_then(|(t, _)| match self.riglet_owner(t) {
-                Some(Node::MeshDeformer(m)) => mesh_entry_of(self, &m.base.id),
+            // (follows directly, MeshGroup entry): directly under a mesh
+            // deformer, or inside a pointwise frame under one.
+            let follows = rot.as_ref().and_then(|(t, _)| match self.riglet_owner(t) {
+                Some(Node::MeshDeformer(m)) => mesh_entry_of(self, &m.base.id).map(|u| (true, u)),
                 Some(Node::Rotation(r)) if r.mesh_parent == Some(MeshParent::Pointwise) => {
-                    // translate inside a pointwise frame: the frame's MeshGroup
-                    self.riglet_owner(&r.base.id).and_then(|o| mesh_entry_of(self, &o.base().id))
+                    self.riglet_owner(&r.base.id).and_then(|o| mesh_entry_of(self, &o.base().id)).map(|u| (false, u))
                 }
                 _ => None,
             });
-            match (rot, follows_mesh) {
-                (Some((t, mode)), Some(m)) => {
+            match (rot, follows) {
+                // A part inside a pointwise frame: Inochi2D filters its
+                // vertices with its current transform, as Riglet maps them.
+                (Some(_), Some((false, _))) if is_part => {}
+                (Some((t, mode)), Some((direct, m))) => {
                     if is_part {
                         if mode != MeshParent::Pointwise {
                             self.warn(
@@ -1414,16 +1418,22 @@ impl Exporter<'_> {
                                  this rotation deformer follows the mesh differently",
                             );
                         }
-                    } else {
-                        if mode != MeshParent::Translate {
-                            self.warn(
-                                "MESHGROUP_RIGID_APPROXIMATED",
-                                Some(&t),
-                                "Inochi2D can only translate a plain node with its MeshGroup; following the mesh's \
-                                 rotation and scale is dropped",
-                            );
-                        }
+                    } else if mode == MeshParent::Translate {
                         want.entry(m).or_default().push(e.uuid);
+                    } else if direct {
+                        self.warn(
+                            "MESHGROUP_RIGID_APPROXIMATED",
+                            Some(&t),
+                            "Inochi2D can only translate a plain node with its MeshGroup; following the mesh's \
+                             rotation and scale is dropped",
+                        );
+                        want.entry(m).or_default().push(e.uuid);
+                    } else {
+                        self.warn(
+                            "MESHGROUP_RIGID_APPROXIMATED",
+                            Some(&t),
+                            "a plain node inside a pointwise frame: Inochi2D's MeshGroup doesn't deform it",
+                        );
                     }
                 }
                 // A plain node that must not follow; only matters when it

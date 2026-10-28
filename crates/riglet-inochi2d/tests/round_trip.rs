@@ -137,7 +137,10 @@ fn mesh_groups_with_static_and_animated_children() {
     // MeshGroup -> static translated part, animated part (pointwise),
     // translate_children node with a leaf; nested static MeshGroup.
     let stat = part(5, "static", [1.0, 1.0], [2.0, 2.0], translated(1.0, 1.0));
-    let anim = part(6, "anim", [3.0, 3.0], [4.0, 4.0], json!({}));
+    // An animated part inside another animated part: nested in a
+    // pointwise frame, exact (no MESHGROUP_RIGID_APPROXIMATED).
+    let nested = part(13, "nested", [0.0, 0.0], [1.0, 1.0], translated(0.5, 0.5));
+    let anim = part(6, "anim", [3.0, 3.0], [4.0, 4.0], json!({"children": [nested]}));
     let leaf = part(8, "leaf", [0.0, 0.0], [1.0, 1.0], json!({}));
     let n = node(7, "n", vec![leaf], translated(4.0, 5.0));
     let inner_child = part(10, "ic", [1.0, 1.0], [2.0, 2.0], json!({}));
@@ -157,13 +160,14 @@ fn mesh_groups_with_static_and_animated_children() {
         "Linear",
     );
     let tx = binding(6, "transform.t.x", json!([[0], [2]]), "Linear");
+    let ty = binding(13, "transform.t.y", json!([[0], [1]]), "Linear");
     let d =
         binding(5, "deform", json!([[[[0, 0], [0, 0], [0, 0], [0, 0]]], [[[1, 0], [1, 0], [1, 0], [1, 0]]]]), "Linear");
     let w = round_trip(&puppet(
         vec![mg],
         vec![
             param(11, "stretch", 0.0, 1.0, &[0.0, 1.0], vec![stretch]),
-            param(12, "m", 0.0, 1.0, &[0.0, 1.0], vec![tx, d]),
+            param(12, "m", 0.0, 1.0, &[0.0, 1.0], vec![tx, ty, d]),
         ],
     ));
     assert!(w.is_empty(), "{w:?}");
