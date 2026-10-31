@@ -233,19 +233,43 @@ fn blend_mode_names_round_trip() {
     }
 }
 
-/// Packages are byte-identical on every OS: every central-directory entry
-/// records Unix as the creating system ("version made by" high byte 3),
-/// never the host's (zip would write DOS on Windows).
+/// Packages are byte-identical on every OS: every entry fixes each field
+/// that would otherwise come from the host. Central directory: made by
+/// Unix (high byte 3, zip writes DOS on Windows), DOS time 0 and date 33
+/// (1980-01-01 00:00), no flags, no extra field or comment, internal
+/// attributes 0, external attributes 0644 regular file (0755 directory)
+/// with no DOS bits. Local headers: the same time, date and flags, no
+/// extra field.
 #[test]
-fn packages_record_the_same_system_on_every_os() {
-    let doc = riglet_fixtures::Builder::new().document();
-    let bytes = riglet_format::write_package_bytes(&doc).unwrap();
-    let mut entries = 0;
-    for at in 0..bytes.len().saturating_sub(46) {
-        if bytes[at..at + 4] == *b"PK\x01\x02" {
-            entries += 1;
-            assert_eq!(bytes[at + 5], 3, "entry {entries}: made by system {}", bytes[at + 5]);
-        }
+fn packages_fix_every_os_dependent_zip_field() {
+    let mut doc = riglet_fixtures::Builder::new().document();
+    doc.files.insert("extra/".into(), Vec::new());
+    doc.files.insert("extra/notes.txt".into(), b"hello".to_vec());
+    let b = riglet_format::write_package_bytes(&doc).unwrap();
+    let u16_at = |at: usize| u16::from_le_bytes([b[at], b[at + 1]]);
+    let u32_at = |at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+    let eocd = b.windows(4).rposition(|w| w == b"PK\x05\x06").expect("end of central directory");
+    let count = u16_at(eocd + 10) as usize;
+    let mut at = u32_at(eocd + 16) as usize;
+    let mut names = Vec::new();
+    for _ in 0..count {
+        assert_eq!(&b[at..at + 4], b"PK\x01\x02");
+        let (made_by, flags, time, date) = (u16_at(at + 4), u16_at(at + 8), u16_at(at + 12), u16_at(at + 14));
+        let (name_len, extra_len, comment_len) = (u16_at(at + 28) as usize, u16_at(at + 30), u16_at(at + 32));
+        let (internal, external, local) = (u16_at(at + 36), u32_at(at + 38), u32_at(at + 42) as usize);
+        let name = String::from_utf8(b[at + 46..at + 46 + name_len].to_vec()).unwrap();
+        assert_eq!(made_by >> 8, 3, "{name}: made by system");
+        assert_eq!((flags, time, date), (0, 0, 33), "{name}: flags, time, date");
+        assert_eq!((extra_len, comment_len, internal), (0, 0, 0), "{name}: extra, comment, internal attributes");
+        let mode = if name.ends_with('/') { 0o040755 } else { 0o100644 };
+        assert_eq!(external, mode << 16, "{name}: external attributes {:o}", external >> 16);
+        assert_eq!(&b[local..local + 4], b"PK\x03\x04");
+        assert_eq!((u16_at(local + 6), u16_at(local + 10), u16_at(local + 12)), (0, 0, 33), "{name}: local header");
+        assert_eq!(u16_at(local + 28), 0, "{name}: local extra field");
+        names.push(name);
+        at += 46 + name_len + usize::from(extra_len) + usize::from(comment_len);
     }
-    assert!(entries >= 3, "found {entries} central-directory entries");
+    assert!(names.contains(&"extra/".to_owned()) && names.contains(&"manifest.json".to_owned()), "{names:?}");
+    // And writing twice gives the same bytes.
+    assert_eq!(riglet_format::write_package_bytes(&doc).unwrap(), b);
 }

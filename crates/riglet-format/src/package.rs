@@ -169,8 +169,10 @@ pub fn write_package<W: Write + Seek>(doc: &Document, writer: W) -> Result<W, Pa
     manifest.format = FORMAT_NAME.to_owned();
     manifest.schema_version = CURRENT_SCHEMA_VERSION.to_owned();
 
-    // Fixed time, permissions and "made by" system: the same document gives
-    // the same bytes on every OS (zip otherwise records DOS on Windows).
+    // Every OS-dependent ZIP field is fixed, so the same document gives the
+    // same bytes on every OS: time 1980-01-01 00:00, permissions 0644
+    // (0755 for directory entries), "made by" Unix (zip would record DOS
+    // on Windows), no extra fields.
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .last_modified_time(zip::DateTime::DEFAULT)
@@ -184,7 +186,7 @@ pub fn write_package<W: Write + Seek>(doc: &Document, writer: W) -> Result<W, Pa
     zip.write_all(&to_json(&doc.model, MODEL_FILE)?)?;
     for (name, data) in &doc.files {
         if name.ends_with('/') {
-            zip.add_directory(name.as_str(), options)?;
+            zip.add_directory(name.as_str(), options.unix_permissions(0o755))?;
         } else {
             zip.start_file(name.as_str(), options)?;
             zip.write_all(data)?;
