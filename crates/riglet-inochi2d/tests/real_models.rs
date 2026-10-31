@@ -100,6 +100,18 @@ fn import_real_models() {
             let name = path.file_stem().unwrap().to_string_lossy().into_owned();
             std::fs::write(PathBuf::from(dir).join(format!("{name}.png")), image.to_png().unwrap()).unwrap();
         }
+        // Every warning links to something in the model (or names a
+        // motion or texture), so the editor can select it.
+        for w in &import.warnings {
+            if let Some(id) = &w.object_id {
+                let m = &doc.model;
+                let exists = m.nodes.contains_key(id)
+                    || m.parameters.iter().any(|p| p.id == *id)
+                    || m.motions.iter().any(|x| x.id == *id)
+                    || m.textures.iter().any(|t| t.id == *id);
+                assert!(exists, "{}: {} names `{id}`, which is not in the model", path.display(), w.code);
+            }
+        }
         if let Ok(filter) = std::env::var("RIGLET_SHOW_WARNINGS") {
             for w in import.warnings.iter().filter(|w| w.code == filter) {
                 println!("      {:?}: {}", w.object_id, w.message);

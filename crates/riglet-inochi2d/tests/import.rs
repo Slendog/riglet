@@ -756,3 +756,34 @@ fn translate_children_node_under_an_animated_part_only_translates() {
     assert_close(positions(&rig, &out, 4)[0], [2.0, 2.0]);
     assert!(!codes(&i).iter().any(|c| c.starts_with("MESHGROUP_TRANS")), "{:?}", codes(&i));
 }
+
+/// Every warning names an object that exists after the import: a node
+/// imported with a transform lives on as `inochi:<uuid>:transform`, and the
+/// warning points there (it used to name the bare `inochi:<uuid>`, which
+/// no longer existed, so the editor could not link it).
+#[test]
+fn warnings_name_existing_objects() {
+    let leaf = part(4, "leaf", [0.0, 0.0], [1.0, 1.0], json!({}));
+    let physics = node(
+        3,
+        "phys",
+        vec![leaf],
+        json!({"type": "SimplePhysics", "transform": {"trans": [1, 1, 0], "rot": [0, 0, 0], "scale": [1, 1]}}),
+    );
+    let still = node(5, "still", vec![], json!({"type": "SimplePhysics"}));
+    let i = import(&puppet(vec![physics, still], vec![]));
+    let doc = &i.document;
+    let found: Vec<&str> = i
+        .warnings
+        .iter()
+        .filter(|w| w.code == "SIMPLE_PHYSICS_UNSUPPORTED")
+        .filter_map(|w| w.object_id.as_deref())
+        .collect();
+    assert_eq!(found, ["inochi:3:transform", "inochi:5"]);
+    for w in i.warnings.iter().chain(doc.manifest.provenance.iter().flat_map(|p| &p.warnings)) {
+        if let Some(id) = &w.object_id {
+            let exists = doc.model.nodes.contains_key(id) || doc.model.parameters.iter().any(|p| p.id == *id);
+            assert!(exists, "{} names `{id}`, which is not in the model", w.code);
+        }
+    }
+}

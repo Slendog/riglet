@@ -2100,6 +2100,7 @@ pub fn import(bytes: &[u8], options: &Options) -> Result<Import, InochiError> {
     model.canvas = Canvas { width: size[0], height: size[1] };
     // A Riglet export recorded the canvas and the ids of native nodes and
     // parameters (org.riglet.model): restore them.
+    let mut rename = HashMap::new();
     if let Some(r) = &riglet_entry {
         let c = floats(r.get("canvas"));
         if let [w, h] = c[..]
@@ -2110,9 +2111,12 @@ pub fn import(bytes: &[u8], options: &Options) -> Result<Import, InochiError> {
         {
             model.canvas = Canvas { width: w, height: h };
         }
-        model = restore_ids(model, r);
+        let (restored, renamed) = restore_ids(model, r);
+        model = restored;
+        rename = renamed;
     }
     out_of_range(&extents, &model.canvas, &mut warnings);
+    resolve_warning_objects(&model, &rename, &mut warnings);
 
     warnings.shrink_to_fit();
     let document = Document { manifest: manifest(warnings.clone()), model, files };
@@ -2206,7 +2210,7 @@ fn motions(json: &Value, params: &HashMap<u32, ParamInfo>, warnings: &mut Vec<Co
 /// export recorded (org.riglet.model `nodeIds`, `parameterIds`): the
 /// node's outermost Riglet node (its rotation deformer if it has one) and
 /// every reference to it. Ids already in use are left alone.
-fn restore_ids(model: Model, entry: &Value) -> Model {
+fn restore_ids(model: Model, entry: &Value) -> (Model, HashMap<String, String>) {
     let mut rename: HashMap<String, String> = HashMap::new();
     let taken: HashSet<String> = model.nodes.keys().chain(model.parameters.iter().map(|p| &p.id)).cloned().collect();
     // Untrusted: every new id is used once and collides with nothing.
@@ -2230,7 +2234,7 @@ fn restore_ids(model: Model, entry: &Value) -> Model {
         }
     }
     if rename.is_empty() {
-        return model;
+        return (model, rename);
     }
     fn walk(v: &mut Value, rename: &HashMap<String, String>) {
         match v {
@@ -2253,9 +2257,32 @@ fn restore_ids(model: Model, entry: &Value) -> Model {
             _ => {}
         }
     }
-    let Ok(mut v) = serde_json::to_value(&model) else { return model };
+    let Ok(mut v) = serde_json::to_value(&model) else { return (model, HashMap::new()) };
     walk(&mut v, &rename);
-    serde_json::from_value(v).unwrap_or(model)
+    match serde_json::from_value(v) {
+        Ok(renamed) => (renamed, rename),
+        Err(_) => (model, HashMap::new()),
+    }
+}
+
+/// Points every warning's object id at the Riglet object that exists after
+/// the import: a node imported with its transform lives on as
+/// `inochi:<uuid>:transform`, and ids restored from an earlier Riglet export
+/// are renamed. Ids that match no node or parameter (motions, textures)
+/// are left as they are.
+fn resolve_warning_objects(model: &Model, rename: &HashMap<String, String>, warnings: &mut [ConversionWarning]) {
+    let params: HashSet<&str> = model.parameters.iter().map(|p| p.id.as_str()).collect();
+    let exists = |id: &str| model.nodes.contains_key(id) || params.contains(id);
+    for w in warnings {
+        let Some(id) = w.object_id.clone() else { continue };
+        for candidate in [id.clone(), format!("{id}:transform")] {
+            let candidate = rename.get(&candidate).cloned().unwrap_or(candidate);
+            if exists(&candidate) {
+                w.object_id = Some(candidate);
+                break;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
