@@ -255,7 +255,7 @@ fn readback_handles_odd_widths() {
     rig.evaluate(&ParamValues::defaults(&rig), &mut out);
     let model = r.upload(&doc, &rig).unwrap();
     for width in [1u32, 3, 63, 64, 65, 127, 257] {
-        let options = FrameOptions { scale: width as f32, background: None };
+        let options = FrameOptions { scale: width as f32, ..Default::default() };
         let image = r.render(&model, &rig, (1.0, 1.0), &out, &options).unwrap();
         assert_eq!((image.width, image.height), (width, width));
         assert!(image.rgba.as_chunks::<4>().0.iter().all(|p| *p == [10, 200, 30, 255]), "width {width}: wrong pixels");
@@ -293,7 +293,7 @@ fn budgets_fail_cleanly_before_allocating() {
         rig.evaluate(&ParamValues::defaults(&rig), &mut out);
         let canvas = (doc.model.canvas.width, doc.model.canvas.height);
         let model = r.upload(&doc, &rig)?;
-        r.render(&model, &rig, canvas, &out, &FrameOptions { scale, background: None })
+        r.render(&model, &rig, canvas, &out, &FrameOptions { scale, ..Default::default() })
     };
 
     // Max-depth composites at max output size: over the memory budget (or
@@ -351,7 +351,7 @@ fn webgl2_limits_are_enforced() {
     let mut out = EvalOutput::new();
     rig.evaluate(&ParamValues::defaults(&rig), &mut out);
     let model = r.upload(&doc, &rig).unwrap();
-    let frame = |scale: f32| FrameOptions { scale, background: None };
+    let frame = |scale: f32| FrameOptions { scale, ..Default::default() };
     assert!(r.render(&model, &rig, (1.0, 1.0), &out, &frame(2048.0)).is_ok());
     assert!(matches!(
         r.render(&model, &rig, (1.0, 1.0), &out, &frame(2049.0)),
@@ -407,7 +407,7 @@ fn non_finite_vertices_skip_their_triangles() {
                 &owned
             }
         };
-        let options = FrameOptions { scale: 16.0, background: None };
+        let options = FrameOptions { scale: 16.0, ..Default::default() };
         (r.render(model, &rig, (4.0, 4.0), &out, &options).unwrap(), out.non_finite)
     };
     let (want_half, _) = render(&scene(true, false), 1.0, None);
@@ -425,4 +425,131 @@ fn non_finite_vertices_skip_their_triangles() {
     let (got, report) = render(&b, 0.0, Some(&model));
     assert!(report.is_empty());
     assert_eq!(got.rgba, want_full.rgba);
+}
+
+fn evaluated(b: &riglet_fixtures::Builder) -> (riglet_format::Document, Rig, EvalOutput) {
+    let doc = b.document();
+    let rig = Rig::prepare(&doc, &Limits::default()).unwrap();
+    let mut out = EvalOutput::new();
+    rig.evaluate(&ParamValues::defaults(&rig), &mut out);
+    (doc, rig, out)
+}
+
+/// The editor's path (`render_to` into its own texture, then reading it)
+/// gives exactly what `render` gives, and a view the size of R7's output
+/// with no pan is exactly R7, for every fixture.
+#[test]
+fn render_to_and_an_r7_sized_view_match_render() {
+    let Some(r) = renderer() else { return };
+    for f in fixtures::all() {
+        let doc = f.builder.document();
+        let rig = Rig::prepare(&doc, &Limits::default()).unwrap();
+        let mut params = ParamValues::defaults(&rig);
+        for (id, v) in &f.params {
+            assert!(params.set(&rig, id, *v));
+        }
+        let mut out = EvalOutput::new();
+        rig.evaluate(&params, &mut out);
+        let model = r.upload(&doc, &rig).unwrap();
+        let canvas = (doc.model.canvas.width, doc.model.canvas.height);
+        let plain = FrameOptions::default();
+        let want = r.render(&model, &rig, canvas, &out, &plain).unwrap();
+
+        let (w, h) = r.frame_size(canvas, &plain).unwrap();
+        let target = r.create_target(w, h);
+        r.render_to(&model, &rig, canvas, &out, &plain, &target).unwrap();
+        let got = r.read_target(&target, None).unwrap();
+        assert_eq!(got, want, "{}: render_to differs from render", f.name);
+
+        let view = FrameOptions { view: Some(riglet_render::View { width: w, height: h, pan: [0.0, 0.0] }), ..plain };
+        let got = r.render(&model, &rig, canvas, &out, &view).unwrap();
+        assert_eq!(got, want, "{}: an R7-sized view differs from R7", f.name);
+    }
+}
+
+/// A view places model (0, 0) at the output center plus the pan, at the
+/// zoom given by `scale`, on an output of any size.
+#[test]
+fn views_zoom_and_pan() {
+    let Some(r) = renderer() else { return };
+    let mut b = riglet_fixtures::Builder::new();
+    b.model.canvas = riglet_format::model::Canvas { width: 1.0, height: 1.0 };
+    b.texture("c", 1, 1, &[10, 200, 30, 255], false);
+    b.quad("q", "root", "c", [-0.5, -0.5], [0.5, 0.5]);
+    let (doc, rig, out) = evaluated(&b);
+    let model = r.upload(&doc, &rig).unwrap();
+    // A 4 x 4 square on a 12 x 8 output, moved 3 px left and 1 px down:
+    // center (6 - 3, 4 + 1), so pixels x 1..5, y 3..7.
+    for (pan, xs, ys) in [([0.0, 0.0], 4..8, 2..6), ([-3.0, 1.0], 1..5, 3..7)] {
+        let view = riglet_render::View { width: 12, height: 8, pan };
+        let options = FrameOptions { scale: 4.0, view: Some(view), ..Default::default() };
+        let image = r.render(&model, &rig, (1.0, 1.0), &out, &options).unwrap();
+        assert_eq!((image.width, image.height), (12, 8));
+        for y in 0..8 {
+            for x in 0..12 {
+                let at = (y * 12 + x) * 4;
+                let want: [u8; 4] = if xs.contains(&x) && ys.contains(&y) { [10, 200, 30, 255] } else { [0, 0, 0, 0] };
+                assert_eq!(image.rgba[at..at + 4], want, "pan {pan:?}: pixel ({x}, {y})");
+            }
+        }
+    }
+}
+
+#[test]
+fn bad_views_and_targets_are_errors() {
+    let Some(r) = renderer() else { return };
+    let mut b = riglet_fixtures::Builder::new();
+    b.model.canvas = riglet_format::model::Canvas { width: 4.0, height: 4.0 };
+    b.texture("c", 1, 1, &[255; 4], false);
+    b.quad("q", "root", "c", [-2.0, -2.0], [2.0, 2.0]);
+    let (doc, rig, out) = evaluated(&b);
+    let model = r.upload(&doc, &rig).unwrap();
+    let view = |width, height, pan| FrameOptions {
+        view: Some(riglet_render::View { width, height, pan }),
+        ..Default::default()
+    };
+    let render = |o: &FrameOptions| r.render(&model, &rig, (4.0, 4.0), &out, o);
+    assert!(matches!(render(&view(0, 4, [0.0; 2])), Err(RenderError::OutputSize { .. })));
+    assert!(matches!(render(&view(4, u32::MAX, [0.0; 2])), Err(RenderError::OutputSize { .. })));
+    assert!(matches!(render(&view(4, 4, [f32::NAN, 0.0])), Err(RenderError::BadScale)));
+    assert!(matches!(render(&view(4, 4, [0.0, f32::INFINITY])), Err(RenderError::BadScale)));
+
+    let options = FrameOptions::default();
+    let wrong_size = r.create_target(5, 4);
+    let got = r.render_to(&model, &rig, (4.0, 4.0), &out, &options, &wrong_size);
+    assert!(matches!(got, Err(RenderError::Target(_))), "{got:?}");
+    // The right size still renders after a rejected call.
+    let target = r.create_target(4, 4);
+    r.render_to(&model, &rig, (4.0, 4.0), &out, &options, &target).unwrap();
+    assert!(r.read_target(&target, None).unwrap().rgba.iter().all(|&v| v == 255));
+}
+
+/// `from_device` on a device the caller opened (as the editor does with
+/// egui's) renders exactly what `Renderer::new` renders.
+#[test]
+fn from_device_renders_on_a_callers_device() {
+    let Some(own) = renderer() else { return };
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).unwrap();
+    let limits = match device_limits() {
+        DeviceLimits::Adapter => adapter.limits(),
+        DeviceLimits::WebGl2 => wgpu::Limits::downlevel_webgl2_defaults(),
+    };
+    let (device, queue) = pollster::block_on(
+        adapter.request_device(&wgpu::DeviceDescriptor { required_limits: limits, ..Default::default() }),
+    )
+    .unwrap();
+    let shared = Renderer::from_device(&adapter.get_info(), device.clone(), queue, Budgets::default());
+    assert_eq!(shared.adapter().name, own.adapter().name);
+    for f in fixtures::all().into_iter().take(4) {
+        assert_eq!(render_fixture(&shared, &f), render_fixture(&own, &f), "{}", f.name);
+    }
+    // The caller's device stays usable after the renderer is gone.
+    drop(shared);
+    let _ = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 16,
+        usage: wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
 }

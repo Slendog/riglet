@@ -690,6 +690,11 @@ export interface CurveKey {
  *       Otherwise both windings are drawn. The winding is the final one on
  *       screen, so a mirror (negative scale, S6; a fold) flips which side
  *       is culled.
+ *     - Note (non-normative): an editor viewport may render the same frame
+ *       at another output size and move the origin (W / 2, H / 2) by a pan
+ *       offset. That changes only this pixel mapping, never model
+ *       coordinates or evaluation; exported images always use R7 as
+ *       written.
  *
  * R8. Output image. PNG, RGBA8, straight (non-premultiplied) alpha, W x H.
  *     Per pixel, from 8-bit premultiplied (p, a):

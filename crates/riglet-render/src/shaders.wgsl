@@ -6,6 +6,10 @@ struct Frame {
     size: vec2<f32>,
     scale: f32,
     _pad: f32,
+    // Pixel position of model (0, 0): (W / 2, H / 2) in R7, moved by the
+    // editor's pan (computed on the CPU, so R7's case is bit-identical).
+    origin: vec2<f32>,
+    _pad2: vec2<f32>,
 };
 
 struct Draw {
@@ -32,7 +36,7 @@ struct VsOut {
 // R7: model (x, y) -> pixel (x * s + W / 2, y * s + H / 2), +Y down.
 @vertex
 fn vs_mesh(@location(0) pos: vec2<f32>, @location(1) uv: vec2<f32>) -> VsOut {
-    let px = pos * frame.scale + frame.size * 0.5;
+    let px = pos * frame.scale + frame.origin;
     var out: VsOut;
     out.pos = vec4<f32>(px.x / frame.size.x * 2.0 - 1.0, 1.0 - px.y / frame.size.y * 2.0, 0.0, 1.0);
     out.uv = uv;

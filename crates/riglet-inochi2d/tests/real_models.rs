@@ -94,6 +94,7 @@ fn import_real_models() {
             let options = riglet_render::FrameOptions {
                 scale: std::env::var("RIGLET_RENDER_SCALE").ok().and_then(|s| s.parse().ok()).unwrap_or(0.12),
                 background: Some([255, 255, 255]),
+                view: None,
             };
             let image = riglet_render::render_document(&renderer, doc, &rig, &out, &options).unwrap();
             let name = path.file_stem().unwrap().to_string_lossy().into_owned();

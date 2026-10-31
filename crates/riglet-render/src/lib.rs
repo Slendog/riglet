@@ -2,7 +2,10 @@
 //!
 //! One code path for every consumer: the CLI renders offscreen and reads
 //! back a PNG; the editor (M4) will render the same frames into its
-//! viewport with the same pipelines and target format (R1).
+//! viewport with the same pipelines and target format (R1), through
+//! [`Renderer::render_to`] on a device shared with egui
+//! ([`Renderer::from_device`]). [`Renderer::render`] is `render_to` plus a
+//! readback, so the goldens cover the editor's path too.
 //!
 //! Untrusted input: every size is checked against the renderer budgets
 //! ([`Budgets`], spec "Loader resource limits") and the adapter's limits
@@ -45,6 +48,8 @@ pub enum RenderError {
     OffscreenBudget { needed: u64, budget: u64 },
     #[error("the evaluated frame does not match the uploaded model")]
     FrameMismatch,
+    #[error("render target: {0}")]
+    Target(String),
     #[error("GPU error: {0}")]
     Gpu(String),
     #[error("could not encode the image: {0}")]
@@ -103,17 +108,33 @@ pub struct AdapterSummary {
 /// Output settings for one frame.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrameOptions {
-    /// Output scale `s` (R7).
+    /// Output scale `s` (R7); the zoom when `view` is set.
     pub scale: f32,
     /// Opaque straight-RGB background to flatten onto (not part of the
     /// model, R4); `None` keeps transparency.
     pub background: Option<[u8; 3]>,
+    /// An editor viewport instead of R7's canvas-sized output. `None`
+    /// (exported images, the CLI) is exactly R7.
+    pub view: Option<View>,
 }
 
 impl Default for FrameOptions {
     fn default() -> Self {
-        FrameOptions { scale: 1.0, background: None }
+        FrameOptions { scale: 1.0, background: None, view: None }
     }
+}
+
+/// An editor viewport (non-normative, see the note under R7): an output of
+/// any size, with model (0, 0) at its center moved by `pan` pixels. The
+/// view only changes the final pixel mapping in the vertex shader; it never
+/// touches model coordinates or evaluation. A view the size of R7's output
+/// with no pan renders exactly what `view: None` does.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct View {
+    pub width: u32,
+    pub height: u32,
+    /// Offset in output pixels, +X right, +Y down.
+    pub pan: [f32; 2],
 }
 
 struct Pipelines {
@@ -195,6 +216,34 @@ impl Renderer {
         pollster::block_on(Self::new_async(options))
     }
 
+    /// Wraps a device the caller already has (the editor's, shared with
+    /// egui), so frames can be rendered into textures the caller displays.
+    /// The device must not have been opened with fewer limits than the
+    /// models need; the budgets are checked against its limits as usual.
+    /// Unlike [`Renderer::new`], this leaves the device's uncaptured-error
+    /// handler to its owner; the renderer's own errors are still caught by
+    /// error scopes and returned.
+    pub fn from_device(info: &wgpu::AdapterInfo, device: wgpu::Device, queue: wgpu::Queue, budgets: Budgets) -> Self {
+        // Use the DEVICE's limits, not a hardcoded 256: hardware differs
+        // (32 on llvmpipe, 256 on many GPUs) and so will WebGPU targets.
+        let device_limits = device.limits();
+        let summary = AdapterSummary {
+            name: info.name.clone(),
+            backend: format!("{:?}", info.backend),
+            device_type: format!("{:?}", info.device_type),
+            driver: format!("{} {}", info.driver, info.driver_info).trim().to_owned(),
+            max_texture_dimension: device_limits.max_texture_dimension_2d,
+            uniform_offset_alignment: device_limits.min_uniform_buffer_offset_alignment,
+        };
+        let pipelines = create_pipelines(&device);
+        // Dynamic uniform offsets must be multiples of the device's
+        // alignment (256 on many GPUs, 32 on llvmpipe): round the 48-byte
+        // Draw struct up to the next multiple.
+        let align = u64::from(device_limits.min_uniform_buffer_offset_alignment).max(1);
+        let stride = DRAW_UNIFORM_BYTES.div_ceil(align) * align;
+        Renderer { device, queue, summary, budgets, pipelines, draw_stride: stride }
+    }
+
     async fn new_async(options: RendererOptions) -> Result<Self, RenderError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = instance
@@ -222,24 +271,7 @@ impl Renderer {
             .map_err(|e| RenderError::Device(e.to_string()))?;
         // GPU errors become RenderError via error scopes; never panic.
         device.on_uncaptured_error(std::sync::Arc::new(|_| {}));
-        // Use the DEVICE's limits, not a hardcoded 256: hardware differs
-        // (32 on llvmpipe, 256 on many GPUs) and so will WebGPU targets.
-        let device_limits = device.limits();
-        let summary = AdapterSummary {
-            name: info.name,
-            backend: format!("{:?}", info.backend),
-            device_type: format!("{:?}", info.device_type),
-            driver: format!("{} {}", info.driver, info.driver_info).trim().to_owned(),
-            max_texture_dimension: device_limits.max_texture_dimension_2d,
-            uniform_offset_alignment: device_limits.min_uniform_buffer_offset_alignment,
-        };
-        let pipelines = create_pipelines(&device);
-        // Dynamic uniform offsets must be multiples of the device's
-        // alignment (256 on many GPUs, 32 on llvmpipe): round the 48-byte
-        // Draw struct up to the next multiple.
-        let align = u64::from(device_limits.min_uniform_buffer_offset_alignment).max(1);
-        let stride = DRAW_UNIFORM_BYTES.div_ceil(align) * align;
-        Ok(Renderer { device, queue, summary, budgets: options.budgets, pipelines, draw_stride: stride })
+        Ok(Self::from_device(&info, device, queue, options.budgets))
     }
 
     pub fn adapter(&self) -> &AdapterSummary {
@@ -313,7 +345,7 @@ impl Renderer {
         });
         let frame_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("riglet frame"),
-            size: 16,
+            size: 32,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -416,8 +448,41 @@ impl Renderer {
         targets.saturating_mul(u64::from(width)).saturating_mul(u64::from(height)).saturating_mul(4)
     }
 
+    /// Output size of a frame: R7's for `view: None`, the view's otherwise,
+    /// checked against the budgets either way.
+    pub fn frame_size(&self, rig_canvas: (f32, f32), options: &FrameOptions) -> Result<(u32, u32), RenderError> {
+        let Some(view) = options.view else { return self.output_size(rig_canvas, options.scale) };
+        if !options.scale.is_finite() || options.scale <= 0.0 || !view.pan.iter().all(|p| p.is_finite()) {
+            return Err(RenderError::BadScale);
+        }
+        let max = self.budgets.max_output_dimension.min(self.summary.max_texture_dimension);
+        if !(1..=max).contains(&view.width) || !(1..=max).contains(&view.height) {
+            return Err(RenderError::OutputSize { width: view.width.into(), height: view.height.into(), max });
+        }
+        Ok((view.width, view.height))
+    }
+
+    /// A texture that [`Renderer::render_to`] accepts, `width` x `height`,
+    /// also usable as a shader texture and as a copy source.
+    pub fn create_target(&self, width: u32, height: u32) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("riglet output"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: COLOR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        })
+    }
+
     /// Renders one evaluated frame and reads it back as a straight-alpha
-    /// image (R8).
+    /// image (R8): [`Renderer::render_to`] into a new target, then
+    /// [`Renderer::read_target`]. The CLI and the goldens use this, so they
+    /// cover the editor's path.
     pub fn render(
         &self,
         model: &GpuModel,
@@ -426,10 +491,61 @@ impl Renderer {
         frame: &EvalOutput,
         options: &FrameOptions,
     ) -> Result<Image, RenderError> {
+        let (width, height) = self.frame_size(canvas, options)?;
+        self.check_frame(model, frame, width, height)?;
+        let target = self.scoped(|| Ok(self.create_target(width, height)))?;
+        self.render_to(model, rig, canvas, frame, options, &target)?;
+        self.read_target(&target, options.background)
+    }
+
+    /// Renders one evaluated frame into `target` (premultiplied, R1), which
+    /// must be [`COLOR_FORMAT`], a render attachment, and exactly
+    /// [`Renderer::frame_size`]. Nothing is read back.
+    pub fn render_to(
+        &self,
+        model: &GpuModel,
+        rig: &Rig,
+        canvas: (f32, f32),
+        frame: &EvalOutput,
+        options: &FrameOptions,
+        target: &wgpu::Texture,
+    ) -> Result<(), RenderError> {
+        let (width, height) = self.frame_size(canvas, options)?;
+        if target.format() != COLOR_FORMAT
+            || !target.usage().contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+            || (target.width(), target.height()) != (width, height)
+            || target.depth_or_array_layers() != 1
+            || target.sample_count() != 1
+        {
+            return Err(RenderError::Target(format!(
+                "need a {width}x{height} {COLOR_FORMAT:?} render attachment, got {}x{} {:?}",
+                target.width(),
+                target.height(),
+                target.format()
+            )));
+        }
+        self.check_frame(model, frame, width, height)?;
+        // The pixel mapping's origin (R7: the output center); the view
+        // moves only this.
+        let pan = options.view.map_or([0.0, 0.0], |v| v.pan);
+        let origin = [width as f32 * 0.5 + pan[0], height as f32 * 0.5 + pan[1]];
+        let output = target.create_view(&wgpu::TextureViewDescriptor::default());
+        self.scoped(|| self.render_inner(model, rig, frame, options.scale, origin, &output, width, height))
+    }
+
+    /// Reads a [`COLOR_FORMAT`] texture with `COPY_SRC` usage back as a
+    /// straight-alpha image (R8), flattened onto `background` if given.
+    pub fn read_target(&self, target: &wgpu::Texture, background: Option<[u8; 3]>) -> Result<Image, RenderError> {
+        if target.format() != COLOR_FORMAT || !target.usage().contains(wgpu::TextureUsages::COPY_SRC) {
+            return Err(RenderError::Target(format!("cannot read back a {:?} texture", target.format())));
+        }
+        self.scoped(|| self.read_inner(target, background))
+    }
+
+    fn check_frame(&self, model: &GpuModel, frame: &EvalOutput, width: u32, height: u32) -> Result<(), RenderError> {
         if frame.drawables.len() != model.drawable_count || frame.composites.len() != model.composite_count {
             return Err(RenderError::FrameMismatch);
         }
-        let (width, height) = self.output_size(canvas, options.scale)?;
         if model.depth > self.budgets.max_composite_depth {
             return Err(RenderError::NestingTooDeep { depth: model.depth, max: self.budgets.max_composite_depth });
         }
@@ -437,10 +553,15 @@ impl Renderer {
         if needed > self.budgets.max_offscreen_bytes {
             return Err(RenderError::OffscreenBudget { needed, budget: self.budgets.max_offscreen_bytes });
         }
+        Ok(())
+    }
 
+    /// Runs `f` inside validation and out-of-memory error scopes, so GPU
+    /// errors become [`RenderError::Gpu`] instead of panics.
+    fn scoped<T>(&self, f: impl FnOnce() -> Result<T, RenderError>) -> Result<T, RenderError> {
         let validation_scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let oom_scope = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-        let result = self.render_inner(model, rig, frame, options, width, height);
+        let result = f();
         let oom = pollster::block_on(oom_scope.pop());
         let validation = pollster::block_on(validation_scope.pop());
         if let Some(e) = oom.or(validation) {
@@ -484,15 +605,18 @@ impl Renderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_inner(
         &self,
         model: &GpuModel,
         rig: &Rig,
         frame: &EvalOutput,
-        options: &FrameOptions,
+        scale: f32,
+        origin: [f32; 2],
+        output: &wgpu::TextureView,
         width: u32,
         height: u32,
-    ) -> Result<Image, RenderError> {
+    ) -> Result<(), RenderError> {
         // Per-frame data: vertices (current positions + static UVs) and
         // one draw uniform per drawable and composite.
         // Interleaved per vertex: pos.x, pos.y, u, v.
@@ -545,8 +669,10 @@ impl Renderer {
             put(model.drawable_count + slot, [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, c.opacity, clip, invert, 0.0]);
         }
         self.queue.write_buffer(&model.uniform_buffer, 0, &uniforms);
-        let frame_uniform: Vec<u8> =
-            [width as f32, height as f32, options.scale, 0.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let frame_uniform: Vec<u8> = [width as f32, height as f32, scale, 0.0, origin[0], origin[1], 0.0, 0.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
         self.queue.write_buffer(&model.frame_buffer, 0, &frame_uniform);
 
         // Targets: output, one layer per depth, two mask buffers.
@@ -562,7 +688,6 @@ impl Renderer {
                 view_formats: &[],
             })
         };
-        let output = color("riglet output", wgpu::TextureUsages::COPY_SRC);
         let layers: Vec<wgpu::Texture> =
             (0..model.depth).map(|_| color("riglet layer", wgpu::TextureUsages::TEXTURE_BINDING)).collect();
         let mask_size = if model.has_masks { (width, height) } else { (1, 1) };
@@ -616,8 +741,15 @@ impl Renderer {
             mask_group: &mask_group,
             dummy_group: &dummy_group,
         };
-        ctx.render_scope(&mut encoder, &view(&output), &frame.members, 0);
+        ctx.render_scope(&mut encoder, output, &frame.members, 0);
+        self.queue.submit([encoder.finish()]);
+        Ok(())
+    }
 
+    fn read_inner(&self, output: &wgpu::Texture, background: Option<[u8; 3]>) -> Result<Image, RenderError> {
+        let (width, height) = (output.width(), output.height());
+        let mut encoder =
+            self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("riglet readback") });
         // Readback with rows padded to wgpu's 256-byte alignment.
         let unpadded = width as usize * 4;
         let padded = unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize)
@@ -630,7 +762,7 @@ impl Renderer {
         });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &output,
+                texture: output,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -661,7 +793,7 @@ impl Renderer {
                 .ok_or_else(|| RenderError::Gpu("short readback".into()))?
         };
         readback.unmap();
-        Ok(Image::from_premultiplied(width, height, bytes, options.background))
+        Ok(Image::from_premultiplied(width, height, bytes, background))
     }
 }
 

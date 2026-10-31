@@ -351,8 +351,9 @@ fn render(
 
     let renderer = Renderer::new(RendererOptions { force_software: software, ..Default::default() })
         .map_err(|e| error(e.to_string()))?;
-    let image = riglet_render::render_document(&renderer, &doc, &rig, &frame, &FrameOptions { scale, background })
-        .map_err(|e| error(e.to_string()))?;
+    let image =
+        riglet_render::render_document(&renderer, &doc, &rig, &frame, &FrameOptions { scale, background, view: None })
+            .map_err(|e| error(e.to_string()))?;
     let png = image.to_png().map_err(|e| error(e.to_string()))?;
     let mut file = File::create(output).map_err(|e| error(format!("cannot write {}: {e}", output.display())))?;
     file.write_all(&png).map_err(|e| error(format!("cannot write {}: {e}", output.display())))?;
