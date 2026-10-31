@@ -51,16 +51,31 @@ fn resizing_keeps_gpu_allocations_bounded() {
 
     render(64, 48);
     let (textures0, memory0) = counters();
-    assert!(textures0 > 0, "wgpu counters are not available on this backend");
-    let mut peak_textures = textures0;
+    // wgpu-hal 30 keeps different counters per backend: Metal counts
+    // textures but not their memory, Vulkan the memory but not the count.
+    // Check whichever this backend keeps; at least one must move.
+    assert!(textures0 > 0 || memory0 > 0, "no wgpu texture counters on this backend");
+    let (mut peak_textures, mut peak_memory) = (textures0, memory0);
     // A window drag passes through hundreds of sizes.
-    for i in 0..300u32 {
-        render(64 + i, 48 + (i * 7) % 200);
-        peak_textures = peak_textures.max(counters().0);
+    let sizes: Vec<(u32, u32)> = (0..300u32).map(|i| (64 + i, 48 + (i * 7) % 200)).collect();
+    for &(w, h) in &sizes {
+        render(w, h);
+        let (t, m) = counters();
+        (peak_textures, peak_memory) = (peak_textures.max(t), peak_memory.max(m));
     }
     render(64, 48);
     let (textures1, memory1) = counters();
-    assert!(peak_textures <= textures0 + 2, "textures grew to {peak_textures} from {textures0}");
-    assert_eq!(textures1, textures0, "textures left behind after resizing");
+    // At most the largest frame's offscreen set plus its target, on top of
+    // the start (a leak of one set per size would be hundreds of times it).
+    let (w, h) = sizes.iter().fold((0, 0), |a, s| (a.0.max(s.0), a.1.max(s.1)));
+    let largest = Renderer::offscreen_bytes(w, h, model.composite_depth(), model.has_masks());
+    assert!(
+        memory0 == 0 || peak_memory <= memory0 + 2 * largest as isize,
+        "texture memory peaked at {peak_memory} from {memory0} (largest frame {largest})"
+    );
     assert_eq!(memory1, memory0, "texture memory left behind after resizing");
+    if textures0 > 0 {
+        assert!(peak_textures <= textures0 + 2, "textures grew to {peak_textures} from {textures0}");
+        assert_eq!(textures1, textures0, "textures left behind after resizing");
+    }
 }

@@ -46,14 +46,30 @@ fn resizing_the_viewport_keeps_gpu_allocations_bounded() {
     frame(&mut viewport, &mut state, 300, 200);
     assert_eq!(viewport.target_generation(), generation, "same size: the target is reused");
     let (textures0, memory0) = counters(&viewport);
-    assert!(textures0 > 0, "wgpu counters are not available on this backend");
-    let mut peak = textures0;
-    for i in 0..300u32 {
-        frame(&mut viewport, &mut state, 300 + i, 200 + (i * 13) % 150);
-        peak = peak.max(counters(&viewport).0);
+    // wgpu-hal 30 keeps different counters per backend: Metal counts
+    // textures but not their memory, Vulkan the memory but not the count.
+    // Check whichever this backend keeps; at least one must move.
+    assert!(textures0 > 0 || memory0 > 0, "no wgpu texture counters on this backend");
+    let (mut peak_textures, mut peak_memory) = (textures0, memory0);
+    let sizes: Vec<(u32, u32)> = (0..300u32).map(|i| (300 + i, 200 + (i * 13) % 150)).collect();
+    for &(w, h) in &sizes {
+        frame(&mut viewport, &mut state, w, h);
+        let (t, m) = counters(&viewport);
+        (peak_textures, peak_memory) = (peak_textures.max(t), peak_memory.max(m));
     }
     frame(&mut viewport, &mut state, 300, 200);
     let (textures1, memory1) = counters(&viewport);
-    assert!(peak <= textures0 + 2, "textures grew to {peak} from {textures0}");
-    assert_eq!((textures1, memory1), (textures0, memory0), "allocations left behind after resizing");
+    // The largest frame's offscreen set and target (counted as 4 targets
+    // per depth level, generously), on top of the start.
+    let (w, h) = sizes.iter().fold((0, 0), |a, s| (a.0.max(s.0), a.1.max(s.1)));
+    let largest = Renderer::offscreen_bytes(w, h, 8, true);
+    assert!(
+        memory0 == 0 || peak_memory <= memory0 + 2 * largest as isize,
+        "texture memory peaked at {peak_memory} from {memory0} (bound {largest})"
+    );
+    assert_eq!(memory1, memory0, "texture memory left behind after resizing");
+    if textures0 > 0 {
+        assert!(peak_textures <= textures0 + 2, "textures grew to {peak_textures} from {textures0}");
+        assert_eq!(textures1, textures0, "textures left behind after resizing");
+    }
 }
