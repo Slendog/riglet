@@ -160,6 +160,13 @@ fn meshgroup_error() {
         let mut per_param: BTreeMap<String, (f32, u32)> = BTreeMap::new();
         let mut per_drawable: HashMap<u32, f32> = HashMap::new();
         let mut defaults_max = 0.0f32;
+        // DEFORM_OUT_OF_RANGE data (broken deltas far off canvas): counted
+        // on their own line, kept out of the statistics. Per drawable:
+        // vertex-samples and the largest coordinate seen.
+        let canvas = &import.document.model.canvas;
+        let limit = [canvas.width * 100.0, canvas.height * 100.0];
+        let in_range = |p: &[f32; 2]| p[0].abs() <= limit[0] && p[1].abs() <= limit[1];
+        let mut out_of_range: BTreeMap<u32, (u32, f32)> = BTreeMap::new();
         for (label, values) in &samples {
             let inochi = puppet.evaluate(values);
             let variant = puppet.evaluate_with(values, Some(&fixed));
@@ -175,6 +182,13 @@ fn meshgroup_error() {
                 let ours = common::positions(&rig, &out, uuid);
                 assert_eq!(ours.len(), reference.positions.len(), "vertex count of {uuid}");
                 for (k, (a, b)) in ours.iter().zip(&reference.positions).enumerate() {
+                    if !in_range(a) || !in_range(b) {
+                        let entry = out_of_range.entry(uuid).or_default();
+                        entry.0 += 1;
+                        let largest = [a[0], a[1], b[0], b[1]].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+                        entry.1 = entry.1.max(largest);
+                        continue;
+                    }
                     let e = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt();
                     let key = if reference.outside.contains(&k) {
                         "bitmask miss"
@@ -228,6 +242,15 @@ fn meshgroup_error() {
             count(Class::BehindNode)
         );
         println!("   at defaults: max {defaults_max:.3} px (all classes)");
+        let total: u32 = out_of_range.values().map(|v| v.0).sum();
+        println!(
+            "   out of range (beyond 100x the canvas, DEFORM_OUT_OF_RANGE; not in the statistics): {total} vertex-samples \
+             in {} drawables",
+            out_of_range.len()
+        );
+        for (uuid, (n, largest)) in &out_of_range {
+            println!("       {n:8} vertex-samples, up to {largest:e} px: {}", names.get(uuid).unwrap_or(&"?"));
+        }
         println!("   Riglet vs Inochi2D:");
         for (label, v) in &mut errs {
             let max = v.iter().copied().fold(0.0f32, f32::max);

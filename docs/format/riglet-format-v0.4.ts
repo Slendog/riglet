@@ -36,7 +36,8 @@
  *     0.4.0 was, see spec-changes.md).
  *
  * Migration 0.4.0 -> 0.4.1: none (patch: E10 defines what evaluation does
- * when finite values overflow).
+ * when finite values overflow, and the CONVERSION WARNINGS section lists the
+ * codes shared by every converter).
  *
  * Migration 0.3.x -> 0.4.0: none (only optional fields and values were
  * added). One evaluation change: a rotation scale that evaluates below 0
@@ -69,7 +70,8 @@ export interface Provenance {
 }
 
 export interface ConversionWarning {
-  code: string;                    // stable, e.g. "KEYFORM_INTERACTION_DROPPED"
+  code: string;                    // stable, e.g. "KEYFORM_INTERACTION_DROPPED";
+                                   // see CONVERSION WARNINGS
   objectId?: Id;
   message: string;
 }
@@ -548,6 +550,8 @@ export interface CurveKey {
  *     - Each frame, an implementation reports how many positions and how
  *       many values were not finite, with the first node of each (drawables
  *       in slot order, then composites), so the cause can be found.
+ *       Importers flag likely culprits when converting (DEFORM_OUT_OF_RANGE,
+ *       CONVERSION WARNINGS).
  *
  * Non-normative (editor, M4): reparenting needs the inverse warp map.
  * Use Newton iteration on W with the analytic Jacobian, a bounded iteration
@@ -830,6 +834,28 @@ export interface CurveKey {
  *
  * Every other LIMIT_* check measures file contents (counts and sizes), so
  * those are format limits (see Limits), not loader budgets.
+ *
+ * =====================================================================
+ * CONVERSION WARNINGS
+ * =====================================================================
+ * Importers and exporters report every lossy or suspicious conversion as a
+ * ConversionWarning (recorded in Provenance.warnings) with a stable code:
+ * codes are never renamed, only added. Codes defined here apply to every
+ * converter. Converter-specific codes are listed with their mappings in
+ * the design documents (docs/design/m3-inochi2d.md for Inochi2D); some
+ * appear in the rules above (MESHGROUP_OUTSIDE_POINTS in E6,
+ * KEYFORM_INTERACTION_DROPPED in KeyformSet).
+ *
+ *   DEFORM_OUT_OF_RANGE (0.4.1)
+ *       An imported position delta (drawable vertex, warp or mesh deformer
+ *       point) or translation delta (rotation deformer origin) is more than
+ *       100 times the canvas size on its axis: |dx| > 100 * canvas.width or
+ *       |dy| > 100 * canvas.height, in model units after conversion,
+ *       against the final canvas. One warning per source binding, whose
+ *       message names the node and the parameter. The data is kept as is:
+ *       such values are almost always broken, and they may overflow during
+ *       evaluation (E10). (Seen in Inochi Creator 0.8.6 exports of
+ *       MeshGroups: deltas up to 4e28 px.)
  *
  * =====================================================================
  * KNOWN GAPS (tracked; resolved by future spec versions)

@@ -277,6 +277,7 @@ Inochi2D has 19 modes. Riglet has normal, additive, multiply.
 | `zSort` (additive) | draw-order deltas (negated) | see draw order |
 | `alphaThreshold` | ext (it has no effect in 0.8: the offset starts at 0 and is multiplied) | ext |
 | `emissionStrength`, physics-node properties | ext | unsupported `BINDING_UNSUPPORTED` |
+| `deform` or `transform.t.x/y` deltas more than 100x the canvas size on their axis (seen in Inochi Creator 0.8.6 exports of MeshGroups) | kept as is | flagged `DEFORM_OUT_OF_RANGE` (spec CONVERSION WARNINGS), message names node and parameter; may overflow at evaluation (E10) |
 
 ### Package-level data
 
@@ -433,6 +434,9 @@ and tint bindings are common.
   allocating; RLE runs bounded by the remaining pixels.
 - After conversion, the result goes through `Rig::prepare` like any other
   file; an importer that produces an invalid model is a bug (tested).
+- Huge but finite deltas are valid and kept, with `DEFORM_OUT_OF_RANGE`;
+  the evaluator flags whatever overflows (spec E10), and the `inp_json`
+  fuzz target checks that its output is finite or flagged.
 
 ## 9. Test plan
 

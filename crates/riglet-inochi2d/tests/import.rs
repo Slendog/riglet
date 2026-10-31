@@ -216,6 +216,32 @@ fn cubic_bindings_are_exact() {
 }
 
 #[test]
+fn deltas_far_beyond_the_canvas_are_flagged_and_kept() {
+    // The quad spans 0..1, so the canvas is 2 x 2 and the limit 200 px.
+    let i = import(&deform_puppet(&[0.0, 1.0], &[0.0, 199.0], "Linear"));
+    assert!(!codes(&i).contains(&"DEFORM_OUT_OF_RANGE"), "{:?}", codes(&i));
+
+    let i = import(&deform_puppet(&[0.0, 1.0], &[0.0, 1e20], "Linear"));
+    let w: Vec<_> = i.warnings.iter().filter(|w| w.code == "DEFORM_OUT_OF_RANGE").collect();
+    assert_eq!(w.len(), 1, "{:?}", codes(&i));
+    assert_eq!(w[0].object_id.as_deref(), Some("inochi:3"));
+    assert!(w[0].message.contains("node `p`") && w[0].message.contains("parameter `move`"), "{}", w[0].message);
+    // Kept as is.
+    assert_eq!(x_at(&rig(&i), 1.0), 1e20);
+
+    // Translation deltas too, checked per axis (y against the height).
+    let b = binding(2, "transform.t.y", json!([[0.0], [-500.0]]), "Linear");
+    let pup = puppet(
+        vec![node(2, "n", vec![part(3, "p", [0.0, 0.0], [1.0, 1.0], json!({}))], json!({}))],
+        vec![param(10, "lift", 0.0, 1.0, &[0.0, 1.0], vec![b])],
+    );
+    let i = import(&pup);
+    let w: Vec<_> = i.warnings.iter().filter(|w| w.code == "DEFORM_OUT_OF_RANGE").collect();
+    assert_eq!(w.len(), 1, "{:?}", codes(&i));
+    assert!(w[0].message.contains("node `n`") && w[0].message.contains("`transform.t.y`"), "{}", w[0].message);
+}
+
+#[test]
 fn unset_points_are_reinterpolated() {
     let values = json!([
         [[[0, 0], [0, 0], [0, 0], [0, 0]]],

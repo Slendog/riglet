@@ -7,7 +7,7 @@ normative text; entries here record the reasoning.
 
 ---
 
-## v0.4.1 — non-finite results (status: ACCEPTED 2026-10-31)
+## v0.4.1 — non-finite results and shared warning codes (status: ACCEPTED 2026-10-31)
 
 Patch (clarifications only, no new fields): any 0.4.x reader reads any
 0.4.x file. Migration from 0.4.0: none.
@@ -44,6 +44,16 @@ infinite points gives NaN. The spec did not say what happens then.
     the affected index ranges to degenerate triangles for that frame and
     restores them on the next finite one. `riglet render` prints both
     counts as warnings (exit code unchanged).
+- **W1. CONVERSION WARNINGS section.** Codes shared by every converter,
+  starting with `DEFORM_OUT_OF_RANGE`: an imported position or
+  translation delta more than 100x the canvas size on its axis (model
+  units, final canvas). One warning per binding, naming the node and the
+  parameter; the data is kept. Why 100x: real deltas stay within about
+  one canvas (the largest in the Aka and Midori `.inx` files are 0.23x
+  and 0.26x the canvas width). 100x leaves room for deliberate off-canvas
+  moves and still catches broken data, which in the example above is
+  1e12 times the canvas or more. Converter-specific codes stay in the
+  design documents.
 
 ---
 

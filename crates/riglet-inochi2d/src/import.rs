@@ -223,7 +223,24 @@ struct Importer<'a> {
     /// Per node and axis (x = 0, y = 1): how many rest values and bindings
     /// rotate it, and the largest angle (radians).
     rot3_used: HashMap<u32, BTreeMap<usize, (u32, f32)>>,
+    /// Largest position and translation deltas per binding, checked
+    /// against the canvas once it is known (DEFORM_OUT_OF_RANGE).
+    extents: Vec<Extent>,
 }
+
+/// The largest |x| and |y| of one binding's position (deform) or
+/// translation deltas, in model units.
+struct Extent {
+    object: Id,
+    node: String,
+    parameter: String,
+    binding: String,
+    max: Vec2,
+}
+
+/// DEFORM_OUT_OF_RANGE: a delta more than this many times the canvas size
+/// on its axis. Finite and kept, but almost certainly broken data.
+pub const OUT_OF_RANGE_FACTOR: f32 = 100.0;
 
 fn warn(warnings: &mut Vec<ConversionWarning>, code: &str, object: Option<&str>, message: impl Into<String>) {
     warnings.push(ConversionWarning { code: code.into(), object_id: object.map(Into::into), message: message.into() });
@@ -1493,6 +1510,17 @@ impl Importer<'_> {
         Some((axes, out))
     }
 
+    /// Records a binding's largest deltas for the DEFORM_OUT_OF_RANGE check.
+    fn note_extent(&mut self, puuid: u32, nuuid: u32, node: &str, binding: &str, max: Vec2) {
+        let parameter = self
+            .param_info
+            .get(&puuid)
+            .and_then(|i| self.params.iter().find(|p| p.id == i.id))
+            .map_or_else(|| puuid.to_string(), |p| p.name.clone());
+        let node = self.nodes.get(node).map_or_else(|| node.to_owned(), |n| n.base().name.clone());
+        self.extents.push(Extent { object: node_id(nuuid), node, parameter, binding: binding.into(), max });
+    }
+
     fn push_set(&mut self, node: &str, axes: Vec<KeyAxis>, keyforms: Vec<Keyform>, combine: Combine) {
         if let Some(n) = self.nodes.get_mut(node) {
             let combine = (combine == Combine::Multiply).then_some(Combine::Multiply);
@@ -1518,13 +1546,18 @@ impl Importer<'_> {
                 };
                 let Some((axes, grid)) = self.grid(puuid, &v, interp, &object) else { return Ok(()) };
                 let bake = target.bake.unwrap_or(Affine::IDENTITY);
+                let mut max = [0.0f32; 2];
                 let kfs = grid
                     .iter()
                     .map(|d| {
                         let d: Vec<Vec2> = d.iter().map(|p| bake.vector(*p)).collect();
+                        for p in &d {
+                            max = [max[0].max(p[0].abs()), max[1].max(p[1].abs())];
+                        }
                         Keyform { positions: Some(self.buf.push_vec2(&d)), ..Default::default() }
                     })
                     .collect();
+                self.note_extent(puuid, nuuid, &dst, name, max);
                 self.push_set(&dst, axes, kfs, Combine::Add);
             }
             (_, Values::Scalar(v)) => {
@@ -1534,6 +1567,12 @@ impl Importer<'_> {
                 match name {
                     "transform.t.x" | "transform.t.y" | "transform.r.z" | "transform.s.x" | "transform.s.y" => {
                         let Some(rid) = target.transform.clone() else { return Ok(()) };
+                        let largest = grid.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+                        match name {
+                            "transform.t.x" => self.note_extent(puuid, nuuid, &rid, name, [largest, 0.0]),
+                            "transform.t.y" => self.note_extent(puuid, nuuid, &rid, name, [0.0, largest]),
+                            _ => {}
+                        }
                         let (kfs, combine) = match name {
                             "transform.t.x" => {
                                 (kf(&|x| Keyform { origin: Some([x, 0.0]), ..Default::default() }), Combine::Add)
@@ -1962,6 +2001,7 @@ pub fn import(bytes: &[u8], options: &Options) -> Result<Import, InochiError> {
         twins: Vec::new(),
         mesh_bakes: HashMap::new(),
         rot3_used: HashMap::new(),
+        extents: Vec::new(),
     };
     im.textures(c.textures)?;
     im.params(&params)?;
@@ -2000,7 +2040,7 @@ pub fn import(bytes: &[u8], options: &Options) -> Result<Import, InochiError> {
     let gravity = json.get("physics").and_then(|p| num(p, "gravity")).unwrap_or(9.8);
     let source_version = json.get("meta").and_then(|m| string(m, "version")).map(str::to_owned);
 
-    let Importer { nodes, buf, mut files, textures, params: parameters, mut warnings, .. } = im;
+    let Importer { nodes, buf, mut files, textures, params: parameters, mut warnings, extents, .. } = im;
     buf.finish(&mut files);
     let mut model_ext = Map::new();
     model_ext.insert(EXT.into(), Value::Object(ext));
@@ -2072,6 +2112,7 @@ pub fn import(bytes: &[u8], options: &Options) -> Result<Import, InochiError> {
         }
         model = restore_ids(model, r);
     }
+    out_of_range(&extents, &model.canvas, &mut warnings);
 
     warnings.shrink_to_fit();
     let document = Document { manifest: manifest(warnings.clone()), model, files };
@@ -2081,6 +2122,32 @@ pub fn import(bytes: &[u8], options: &Options) -> Result<Import, InochiError> {
         })?;
     }
     Ok(Import { document, warnings })
+}
+
+/// DEFORM_OUT_OF_RANGE (design section 4): position or translation deltas
+/// beyond OUT_OF_RANGE_FACTOR x the canvas size on their axis. The data is
+/// kept as is; it evaluates far off canvas (or overflows, see E10).
+fn out_of_range(extents: &[Extent], canvas: &Canvas, warnings: &mut Vec<ConversionWarning>) {
+    let limit = [canvas.width * OUT_OF_RANGE_FACTOR, canvas.height * OUT_OF_RANGE_FACTOR];
+    for e in extents {
+        if e.max[0] > limit[0] || e.max[1] > limit[1] {
+            let largest = e.max[0].max(e.max[1]);
+            warn(
+                warnings,
+                "DEFORM_OUT_OF_RANGE",
+                Some(&e.object),
+                format!(
+                    "node `{}`, parameter `{}`: `{}` deltas reach {largest:e} px, more than {OUT_OF_RANGE_FACTOR}x \
+                     the canvas size ({} x {}); kept as is",
+                    e.node.trim_end_matches('\0'),
+                    e.parameter.trim_end_matches('\0'),
+                    e.binding,
+                    canvas.width,
+                    canvas.height,
+                ),
+            );
+        }
+    }
 }
 
 /// Animations -> Motions (section 4, package-level).
