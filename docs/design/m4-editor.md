@@ -232,11 +232,15 @@ viewport. Codes are filterable. Names from files are shown as plain text.
     are never a save target, recovery write, list, restore and discard.
   - Startup smoke test: manual (no display in CI), checklist below.
 
-**Manual check (step 3 onward).**
+**Manual check (step 3 onward).** Run by the project owner on
+2026-10-31 on the step 4 build (`f3a2770`): items 1, 2, 5, 6 and 7 passed
+(the editor's gray ramp at 100% matched the CLI's PNG; posing, parameter
+and node editing, undo/redo; Windows scaling at 125% and 150%). Items 3
+and 4 were not reported separately.
 
-1. `cargo run -p riglet-cli -- render tests/fixtures/gray-ramp.riglet -o
+1. **[passed 2026-10-31]** `cargo run -p riglet-cli -- render tests/fixtures/gray-ramp.riglet -o
    ramp.png` and open `ramp.png` in an image viewer at 100%.
-2. `cargo run -p riglet-editor -- tests/fixtures/gray-ramp.riglet`, press
+2. **[passed 2026-10-31]** `cargo run -p riglet-editor -- tests/fixtures/gray-ramp.riglet`, press
    `1` (actual size). The 16 gray steps (0, 17, .., 255) must look like the
    viewer's: equal steps, no washed-out darks (an extra gamma decode) or
    crushed darks (an extra encode). The alpha row over the checkerboard
@@ -247,15 +251,15 @@ viewport. Codes are filterable. Names from files are shown as plain text.
    window stays responsive; Save asks for a `.riglet` and never offers the
    imported file. Open another file while one loads: only the last one
    opens.
-5. Parameters: drag sliders and 2D pads (double-click a pad resets);
+5. **[passed 2026-10-31]** Parameters: drag sliders and 2D pads (double-click a pad resets);
    the title shows no unsaved-changes dot. Select a parameter name:
    rename it, empty the name (an error shows, the model keeps the old
    name), drag its default and range (one undo step per drag; a range
    that excludes the default or a key is refused with a tooltip).
-6. Nodes: select one (its mesh is outlined), untick its box (hidden in
+6. **[passed 2026-10-31]** Nodes: select one (its mesh is outlined), untick its box (hidden in
    the viewport only, no dot in the title), toggle Visible in Properties
    (an undoable edit). Undo and redo everything above.
-7. Windows at 125% and 150% display scaling: the gray ramp at actual size
+7. **[passed 2026-10-31]** Windows at 125% and 150% display scaling: the gray ramp at actual size
    is sharp, with no blurred or doubled rows.
 
 ## 10. Decisions (2026-10-31)

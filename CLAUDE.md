@@ -73,6 +73,10 @@ depends on format + render + converters. Only the editor depends on egui.
    - Convert non-PNG textures (TGA, BC7, ...) to PNG.
    - Physics export waits for M5; parameter pairing and warp-deformer
      export moved to M6.
+   - Manual check, 2026-10-31 (project owner): Riglet's exports of Aka and
+     Midori open and behave correctly in Inochi Creator 0.8.6 and Inochi
+     Session 0.8.7 (parameters, masks, blend modes, physics kept in
+     extensions). Passed.
 4. Minimal editor: viewport, node tree, parameter sliders, live preview.
 5. Physics: evaluate the format's `PhysicsRig` (parameters driven by
    simulated motion), with one model that covers both Inochi2D
