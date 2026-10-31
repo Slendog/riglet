@@ -98,6 +98,27 @@ pub enum SaveError {
     Io { path: PathBuf, source: std::io::Error },
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ExportError {
+    #[error("Inochi2D exports are .inp or .inx files")]
+    NotInochi2d,
+    /// The target is the file this model was imported from: the caller
+    /// must ask, naming the file, and call again with it confirmed.
+    #[error("{0} is the file this model was imported from")]
+    NeedsSourceConfirmation(PathBuf),
+    #[error("cannot export: {error} ({})", error.code())]
+    Export { error: riglet_inochi2d::InochiError },
+    #[error("cannot write {path}: {source}")]
+    Io { path: PathBuf, source: std::io::Error },
+}
+
+/// The last export of this session, for the warnings panel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportRecord {
+    pub path: PathBuf,
+    pub warnings: Vec<ConversionWarning>,
+}
+
 /// View-only state: lives in memory only, is never saved, and never
 /// changes the [`Document`] (so it never marks it dirty).
 #[derive(Debug, Clone, PartialEq)]
@@ -167,6 +188,7 @@ pub struct EditorState {
     eval: EvalOutput,
     eval_stale: bool,
     import_warnings: Vec<ConversionWarning>,
+    last_export: Option<ExportRecord>,
     next_gesture: u64,
     /// Identifies the GPU data (meshes, textures) of this document state;
     /// unique across documents, so a viewport knows when to upload again.
@@ -206,6 +228,7 @@ impl EditorState {
             eval: EvalOutput::new(),
             eval_stale: true,
             import_warnings,
+            last_export: None,
             next_gesture: 0,
             gpu_generation: next_gpu_generation(),
             frame_version: 0,
@@ -409,6 +432,51 @@ impl EditorState {
         self.history.mark_saved();
         self.save_path = Some(path.to_owned());
         Ok(())
+    }
+}
+
+impl EditorState {
+    /// Exports to Inochi2D at `path` (`.inp` or `.inx`), atomically like
+    /// Save. Writing over the file the model was imported from needs
+    /// `confirmed_source` to name that same file: otherwise this returns
+    /// [`ExportError::NeedsSourceConfirmation`] and writes nothing. (Other
+    /// existing files are the save dialog's to confirm.) Exporting doesn't
+    /// change the document or its dirty state. Returns the export
+    /// warnings, also kept for [`EditorState::warnings`].
+    pub fn export_inochi2d(
+        &mut self,
+        path: &Path,
+        confirmed_source: Option<&Path>,
+    ) -> Result<&ExportRecord, ExportError> {
+        if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("inp") || e.eq_ignore_ascii_case("inx")) {
+            return Err(ExportError::NotInochi2d);
+        }
+        if same_file(path, &self.source.path) && !confirmed_source.is_some_and(|c| same_file(c, path)) {
+            return Err(ExportError::NeedsSourceConfirmation(self.source.path.clone()));
+        }
+        let exported = riglet_inochi2d::export(&self.document).map_err(|error| ExportError::Export { error })?;
+        write_atomic(path, &exported.bytes).map_err(|source| ExportError::Io { path: path.to_owned(), source })?;
+        Ok(self.last_export.insert(ExportRecord { path: path.to_owned(), warnings: exported.warnings }))
+    }
+
+    pub fn last_export(&self) -> Option<&ExportRecord> {
+        self.last_export.as_ref()
+    }
+
+    /// Every entry for the warnings panel: import warnings from the
+    /// provenance (linked against the current document, so an entry whose
+    /// node is gone says so), the last export's warnings, and the current
+    /// frame's E10 report.
+    pub fn warnings(&mut self) -> Vec<crate::warnings::Entry> {
+        use crate::warnings::{evaluation_entries, export_entries, import_entries};
+        let mut out = import_entries(&self.document);
+        if let Some(e) = &self.last_export {
+            let file = e.path.file_name().map_or_else(|| e.path.display().to_string(), |n| n.to_string_lossy().into());
+            out.extend(export_entries(&self.document, &file, &e.warnings));
+        }
+        let (rig, frame) = self.frame();
+        out.extend(evaluation_entries(rig, frame));
+        out
     }
 }
 

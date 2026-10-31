@@ -15,12 +15,13 @@ use std::time::Instant;
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, Pos2, Rect, Sense, Vec2};
 use eframe::{egui_wgpu, wgpu};
 use riglet_editor::viewport::{outline_edges, pixel_rect};
-use riglet_editor::{EditorState, LoadError, Loader, SaveError, Viewport};
+use riglet_editor::{EditorState, ExportError, LoadError, Loader, SaveError, Viewport};
 use riglet_format::Limits;
 use riglet_render::{Budgets, Renderer};
 
 const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
 const SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
+const EXPORT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::E);
 const SAVE_AS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
 const UNDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
 const REDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z);
@@ -67,6 +68,8 @@ fn wgpu_options() -> egui_wgpu::WgpuConfiguration {
 enum Pending {
     Open(PathBuf),
     Quit,
+    /// Export over the imported source file: needs a confirmation naming it.
+    ExportOverSource(PathBuf),
 }
 
 /// The viewport texture as registered with egui, and what it shows.
@@ -100,6 +103,9 @@ struct App {
     needs_fit: bool,
     render_ms: f32,
     quitting: bool,
+    show_warnings: bool,
+    /// A short result line in the status bar (for example after an export).
+    notice: Option<String>,
 }
 
 impl App {
@@ -120,6 +126,8 @@ impl App {
             needs_fit: false,
             render_ms: 0.0,
             quitting: false,
+            show_warnings: false,
+            notice: None,
         };
         // Same path as File > Open and drag and drop.
         if let Some(path) = initial {
@@ -153,8 +161,11 @@ impl App {
         let Some((_, result)) = self.loader.poll() else { return };
         match result {
             Ok(loaded) => {
+                let has_warnings = loaded.document.manifest.provenance.iter().any(|p| !p.warnings.is_empty());
                 self.state = Some(EditorState::open(loaded, self.loader.limits().clone()));
                 self.edits = panels::Edits::default();
+                self.show_warnings = has_warnings;
+                self.notice = None;
                 self.viewport.clear();
                 self.needs_fit = true;
                 self.render_error = None;
@@ -204,6 +215,44 @@ impl App {
         }
     }
 
+    fn export_dialog(&mut self) {
+        let Some(state) = self.state.as_ref() else { return };
+        let source = state.save_path().unwrap_or(&state.source().path).to_owned();
+        let name = source.file_stem().map_or_else(|| "model".into(), |s| s.to_string_lossy().into_owned());
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Export to Inochi2D")
+            .add_filter("Inochi2D puppet", &["inp"])
+            .add_filter("Inochi Creator project", &["inx"])
+            .set_file_name(format!("{name}.inp"));
+        if let Some(dir) = source.parent() {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(mut path) = dialog.save_file() else { return };
+        if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("inp") || e.eq_ignore_ascii_case("inx")) {
+            path.as_mut_os_string().push(".inp");
+        }
+        self.export(&path, None);
+    }
+
+    /// Exports, asking first (by name) when the target is the imported file.
+    fn export(&mut self, path: &Path, confirmed_source: Option<&Path>) {
+        let Some(state) = self.state.as_mut() else { return };
+        match state.export_inochi2d(path, confirmed_source) {
+            Ok(record) => {
+                let n = record.warnings.len();
+                self.notice =
+                    Some(format!("Exported {} ({n} warning{})", file_name(path), if n == 1 { "" } else { "s" }));
+                if n > 0 {
+                    self.show_warnings = true;
+                }
+            }
+            Err(ExportError::NeedsSourceConfirmation(_)) => {
+                self.pending = Some(Pending::ExportOverSource(path.to_owned()))
+            }
+            Err(e) => self.error = Some(format!("Could not export: {e}")),
+        }
+    }
+
     fn undo(&mut self) {
         self.edits.reset();
         if let Some(Err(e)) = self.state.as_mut().map(EditorState::undo) {
@@ -224,6 +273,9 @@ impl App {
         let pressed = |s: &KeyboardShortcut| ctx.input_mut(|i| i.consume_shortcut(s));
         if pressed(&OPEN) {
             self.open_dialog(ctx);
+        }
+        if pressed(&EXPORT) {
+            self.export_dialog();
         }
         if pressed(&SAVE_AS) {
             self.save_as();
@@ -265,6 +317,15 @@ impl App {
                     .clicked()
                 {
                     self.save_as();
+                }
+                if ui
+                    .add_enabled(
+                        has,
+                        egui::Button::new("Export to Inochi2D…").shortcut_text(ctx.format_shortcut(&EXPORT)),
+                    )
+                    .clicked()
+                {
+                    self.export_dialog();
                 }
                 ui.separator();
                 if ui.button("Quit").clicked() {
@@ -309,8 +370,14 @@ impl App {
         });
     }
 
-    fn status_bar(&self, ui: &mut egui::Ui) {
+    fn status_bar(&mut self, ui: &mut egui::Ui, warnings: usize) {
         ui.horizontal(|ui| {
+            if self.state.is_some() {
+                let label = format!("Warnings ({warnings})");
+                ui.toggle_value(&mut self.show_warnings, label)
+                    .on_hover_text("Import, export and live evaluation warnings");
+                ui.separator();
+            }
             let a = self.viewport.renderer().adapter();
             ui.label(format!("{} ({})", a.name, a.backend));
             ui.separator();
@@ -327,6 +394,10 @@ impl App {
                     ui.separator();
                     ui.label("unsaved changes");
                 }
+            }
+            if let Some(n) = &self.notice {
+                ui.separator();
+                ui.label(n);
             }
             if let Some(e) = &self.render_error {
                 ui.separator();
@@ -474,6 +545,33 @@ impl App {
                 self.error = None;
             }
         }
+        if let Some(Pending::ExportOverSource(path)) = &self.pending {
+            let path = path.clone();
+            let mut choice = None;
+            egui::Modal::new(egui::Id::unique("riglet export over source")).show(ctx, |ui| {
+                ui.set_max_width(480.0);
+                ui.heading(format!("Replace {}?", file_name(&path)));
+                ui.label(format!(
+                    "{} is the file this model was imported from. Exporting replaces it; the original contents are lost.",
+                    path.display()
+                ));
+                ui.horizontal(|ui| {
+                    if ui.button(format!("Replace {}", file_name(&path))).clicked() {
+                        choice = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        choice = Some(false);
+                    }
+                });
+            });
+            if let Some(yes) = choice {
+                self.pending = None;
+                if yes {
+                    self.export(&path, Some(&path));
+                }
+            }
+            return;
+        }
         if self.pending.is_some() {
             let mut choice = None;
             egui::Modal::new(egui::Id::unique("riglet unsaved dialog")).show(ctx, |ui| {
@@ -527,13 +625,20 @@ impl eframe::App for App {
         };
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
 
+        // One list per frame (the live entries follow the current frame).
+        let warnings = self.state.as_mut().map(EditorState::warnings).unwrap_or_default();
         egui::Panel::top("menu").show(ui, |ui| self.menu(ui));
-        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui, warnings.len()));
         if let Some(state) = self.state.as_mut() {
-            egui::Panel::left("nodes").resizable(true).default_size(260.0).show(ui, |ui| {
-                panels::node_tree(ui, state);
-            });
             let edits = &mut self.edits;
+            if self.show_warnings {
+                egui::Panel::bottom("warnings").resizable(true).default_size(200.0).show(ui, |ui| {
+                    panels::warnings_panel(ui, state, edits, &warnings);
+                });
+            }
+            egui::Panel::left("nodes").resizable(true).default_size(260.0).show(ui, |ui| {
+                panels::node_tree(ui, state, edits);
+            });
             egui::Panel::right("parameters").resizable(true).default_size(300.0).show(ui, |ui| {
                 egui::Panel::bottom("properties").resizable(true).default_size(260.0).show(ui, |ui| {
                     egui::ScrollArea::vertical().id_salt("riglet properties").show(ui, |ui| {

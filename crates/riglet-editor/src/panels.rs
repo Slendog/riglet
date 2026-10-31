@@ -3,6 +3,7 @@
 //! hide-in-view toggles are session state.
 
 use eframe::egui::{self, Color32, Id as EguiId, Rect, Sense, Stroke, Vec2};
+use riglet_editor::warnings::{Entry, Origin, Target};
 use riglet_editor::{Command, EditorState, Gesture, Merge};
 use riglet_format::model::{Node, ParamKind};
 
@@ -16,6 +17,11 @@ pub struct Edits {
     /// The value being dragged and its gesture.
     drag: Option<(EguiId, Gesture)>,
     pub selected_param: Option<String>,
+    /// A node to reveal in the tree (expand its ancestors, scroll to it),
+    /// set when a warning entry is clicked.
+    pub reveal: Option<String>,
+    /// Code filter of the warnings panel.
+    pub warning_filter: String,
 }
 
 struct FieldEdit {
@@ -35,12 +41,26 @@ impl Edits {
 
 // ---------- Node tree ----------
 
-pub fn node_tree(ui: &mut egui::Ui, state: &mut EditorState) {
+pub fn node_tree(ui: &mut egui::Ui, state: &mut EditorState, edits: &mut Edits) {
     ui.heading("Nodes");
     ui.separator();
+    // Ancestors of the node to reveal: expanded this frame.
+    let mut path = Vec::new();
+    if let Some(id) = &edits.reveal {
+        let nodes = &state.document().model.nodes;
+        let mut at = nodes.get(id).and_then(|n| n.base().parent.clone());
+        while let Some(p) = at {
+            if path.len() > nodes.len() {
+                break;
+            }
+            at = nodes.get(&p).and_then(|n| n.base().parent.clone());
+            path.push(p);
+        }
+    }
+    let reveal = edits.reveal.take();
     egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
         let root = state.document().model.root.clone();
-        node_row(ui, state, &root, 0);
+        node_row(ui, state, &root, 0, &path, reveal.as_deref());
     });
 }
 
@@ -55,7 +75,7 @@ fn kind_label(node: &Node) -> &'static str {
     }
 }
 
-fn node_row(ui: &mut egui::Ui, state: &mut EditorState, id: &str, depth: usize) {
+fn node_row(ui: &mut egui::Ui, state: &mut EditorState, id: &str, depth: usize, open: &[String], reveal: Option<&str>) {
     // Depth is bounded by validation (the tree is acyclic and within the
     // node limit); egui's own nesting keeps this readable.
     let Some(node) = state.document().model.nodes.get(id) else { return };
@@ -75,22 +95,29 @@ fn node_row(ui: &mut egui::Ui, state: &mut EditorState, id: &str, depth: usize) 
         if !visible {
             text = text.weak().italics();
         }
-        if ui.selectable_label(selected, text).on_hover_text(format!("{kind} `{id}`")).clicked() {
+        let label = ui.selectable_label(selected, text).on_hover_text(format!("{kind} `{id}`"));
+        if label.clicked() {
             state.view.selection = Some(id.to_owned());
+        }
+        if reveal == Some(id) {
+            label.scroll_to_me(Some(egui::Align::Center));
         }
         ui.label(egui::RichText::new(kind).weak().small());
     };
     if children.is_empty() {
         ui.horizontal(|ui| header(ui, state));
     } else {
-        let collapsing = egui::collapsing_header::CollapsingState::load_with_default_open(
+        let mut collapsing = egui::collapsing_header::CollapsingState::load_with_default_open(
             ui.ctx(),
             EguiId::unique(("riglet node", id)),
             depth < 2,
         );
+        if open.iter().any(|o| o == id) {
+            collapsing.set_open(true);
+        }
         collapsing.show_header(ui, |ui| header(ui, state)).body(|ui| {
             for child in &children {
-                node_row(ui, state, child, depth + 1);
+                node_row(ui, state, child, depth + 1, open, reveal);
             }
         });
     }
@@ -410,4 +437,104 @@ pub fn draw_outline(
             painter.line_segment([p, q], stroke);
         }
     }
+}
+
+// ---------- Warnings ----------
+
+fn origin_title(origin: &Origin) -> String {
+    match origin {
+        Origin::Import { source, source_version, imported_at } => {
+            let source = serde_name(source);
+            let version = source_version.as_deref().map(|v| format!(" {v}")).unwrap_or_default();
+            format!("From import ({source}{version}, {imported_at}); may be out of date after edits")
+        }
+        Origin::Export { file } => format!("Last export ({file})"),
+        Origin::Evaluation => "Current frame (live)".into(),
+    }
+}
+
+fn serde_name(source: &riglet_format::model::ProvenanceSource) -> String {
+    use riglet_format::model::ProvenanceSource as P;
+    match source {
+        P::Native => "native",
+        P::Live2dMoc3 => "live2d-moc3",
+        P::Inochi2dInp => "inochi2d-inp",
+        P::Inochi2dInx => "inochi2d-inx",
+        P::Psd => "psd",
+        P::Kra => "kra",
+    }
+    .into()
+}
+
+/// The warnings panel: entries grouped by source, each with its code and
+/// message; an entry naming a node or parameter selects it when clicked.
+pub fn warnings_panel(ui: &mut egui::Ui, state: &mut EditorState, edits: &mut Edits, entries: &[Entry]) {
+    ui.horizontal(|ui| {
+        ui.heading(format!("Warnings ({})", entries.len()));
+        ui.label("Filter:");
+        ui.add(egui::TextEdit::singleline(&mut edits.warning_filter).hint_text("code").desired_width(160.0));
+    });
+    ui.separator();
+    let filter = edits.warning_filter.trim().to_uppercase();
+    let shown: Vec<&Entry> = entries.iter().filter(|e| filter.is_empty() || e.code.contains(&filter)).collect();
+    if shown.is_empty() {
+        ui.weak(if entries.is_empty() { "No warnings." } else { "No warnings match the filter." });
+        return;
+    }
+    let mut groups: Vec<&Origin> = Vec::new();
+    for e in &shown {
+        if !groups.contains(&&e.origin) {
+            groups.push(&e.origin);
+        }
+    }
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        for origin in groups {
+            let members: Vec<&&Entry> = shown.iter().filter(|e| e.origin == *origin).collect();
+            egui::CollapsingHeader::new(format!("{} — {}", origin_title(origin), members.len()))
+                .id_salt(("riglet warnings", format!("{origin:?}")))
+                .default_open(true)
+                .show(ui, |ui| {
+                    for e in members {
+                        warning_row(ui, state, edits, e);
+                    }
+                });
+        }
+    });
+}
+
+fn warning_row(ui: &mut egui::Ui, state: &mut EditorState, edits: &mut Edits, e: &Entry) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new(&e.code).monospace().strong());
+        match &e.target {
+            Target::Node(id) => {
+                let name = state.document().model.nodes.get(id).map_or_else(|| id.clone(), |n| n.base().name.clone());
+                if ui.link(name).on_hover_text(format!("Select node `{id}`")).clicked() {
+                    state.view.selection = Some(id.clone());
+                    edits.selected_param = None;
+                    edits.reveal = Some(id.clone());
+                }
+            }
+            Target::Parameter(id) => {
+                let name = state
+                    .document()
+                    .model
+                    .parameters
+                    .iter()
+                    .find(|p| p.id == *id)
+                    .map_or_else(|| id.clone(), |p| p.name.clone());
+                if ui.link(name).on_hover_text(format!("Select parameter `{id}`")).clicked() {
+                    edits.selected_param = Some(id.clone());
+                    state.view.selection = None;
+                }
+            }
+            Target::Other { kind, id } => {
+                ui.weak(format!("({kind} `{id}`)"));
+            }
+            Target::Removed(id) => {
+                ui.weak(format!("(refers to `{id}`, no longer in the model)"));
+            }
+            Target::None => {}
+        }
+        ui.label(&e.message);
+    });
 }

@@ -176,9 +176,19 @@ not own, including another tool's `editor.json`, is kept verbatim on save
   read; each save removes its target's leftovers older than 10 minutes.
 - **Imported files are never overwritten without asking.** A model opened
   from `.inp`/`.inx` has no save path: Save acts as Save As and proposes a
-  `.riglet` next to it. Export to Inochi2D asks before replacing an
-  existing file, and always asks (with the file named) when the target is
-  the file the model was imported from.
+  `.riglet` next to it. **Export to Inochi2D** (File menu, Cmd/Ctrl+E)
+  writes through the same atomic path as Save. When the target is the
+  file the model was imported from, `EditorState::export_inochi2d`
+  refuses unless the call confirms that exact file
+  (`NeedsSourceConfirmation`); the UI asks "Replace <file>?" naming it.
+  Other existing files are confirmed by the save dialog. Exporting is not
+  an edit (no undo step, dirty state unchanged). Its warnings appear in
+  the warnings panel right after writing, and the panel opens if there
+  are any.
+- **Packages are byte-identical on every OS:** the writer fixes every
+  ZIP field the host could otherwise set (made-by Unix, DOS time
+  1980-01-01 00:00, 0644 files and 0755 directories, no flags, extra
+  fields or comments); a test checks each entry.
 - **Autosave and crash recovery:** while the document is dirty, a
   recovery copy is written every 60 seconds (atomically, as a `.riglet`)
   to the editor's data directory, with a small JSON record of the
@@ -191,18 +201,32 @@ not own, including another tool's `editor.json`, is kept verbatim on save
 
 ## 7. Warnings panel
 
-One list, grouped by source:
+A bottom panel (toggled from the status bar, opened automatically when
+a file has import warnings or an export produced some), grouped and
+labeled by source (`warnings::Origin`):
 
-- **Import:** the `ConversionWarning`s from the import that produced the
-  model, plus those recorded in `manifest.provenance`.
-- **Export:** the warnings of the last export.
-- **Evaluation (live):** the E10 report of the current frame (non-finite
-  vertex positions or values, with the first node), updated as parameters
-  change.
+- **From import:** the `ConversionWarning`s in `manifest.provenance`,
+  one group per import, labeled with the source format, version and
+  import time, and "may be out of date after edits": they describe the
+  model as imported.
+- **Last export:** the warnings of this session's last export, labeled
+  with the file name.
+- **Current frame (live):** the E10 report of the current evaluation
+  (non-finite vertex positions; non-finite opacity, color or draw-order
+  values), with the first node. Entries are a pure function of the
+  frame, which only changes when parameters or the model change, so the
+  panel shows the current state without flicker and an entry disappears
+  as soon as the values are finite again.
 
-Each entry shows its code and message; entries with an `object_id` (or an
-E10 first node) are links that select the node in the tree and the
-viewport. Codes are filterable. Names from files are shown as plain text.
+Each entry shows its code and message. Its object id is resolved
+against the current document (`warnings::Target`): a node or parameter
+is a link that selects it (a node is also revealed in the tree:
+ancestors expanded, scrolled into view); a motion or texture is named;
+an id that matches nothing (removed, or stale data in a file) is shown
+as "no longer in the model" and never crashes or links. The importer
+names the object that exists after import (a node with a transform is
+`inochi:<uuid>:transform`), so fresh imports link fully. A code filter
+narrows the list. Names from files are shown as plain text.
 
 ## 8. Untrusted input
 
@@ -261,6 +285,18 @@ and 4 were not reported separately.
    (an undoable edit). Undo and redo everything above.
 7. **[passed 2026-10-31]** Windows at 125% and 150% display scaling: the gray ramp at actual size
    is sharp, with no blurred or doubled rows.
+8. Open Midori.inp: the warnings panel opens with 55 import warnings,
+   every one linked to a node (none "no longer in the model"). Click one
+   deep in the tree: the node is selected, outlined, and the tree
+   expands and scrolls to it. Filter by `MESH_EMPTY`.
+9. File > Export to Inochi2D: export Midori over `Midori.inp` itself: a
+   dialog names the file before anything is written; Cancel leaves it
+   untouched. Export to a new `.inp`: the status bar reports the warning
+   count and the panel shows a "Last export" group. Open the export in
+   Inochi Creator.
+10. Drag `Head:: Yaw-Pitch` on Midori.inp to a corner: if the broken
+    Creator values overflow, a live E10 entry appears and goes away when
+    the pad returns to the center, without flickering.
 
 ## 10. Decisions (2026-10-31)
 
@@ -285,7 +321,8 @@ and 4 were not reported separately.
    (viewport target equals `riglet render`, gray-ramp fixture). Renderer
    target reuse landed before this step.
 4. Parameter panel; node tree, selection outline, hide-in-view.
-5. Inochi2D open and export, the warnings panel, E10 live entries.
+5. Inochi2D export (atomic, source confirmation), the warnings panel
+   (import, export, live E10; linked, stale-safe), ZIP determinism.
 6. Autosave and crash recovery (not in the editor core commit),
    unsaved-changes prompts, save dialogs.
 
