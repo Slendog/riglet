@@ -198,9 +198,10 @@ viewport. Codes are filterable. Names from files are shown as plain text.
 ## 11. Plan (small commits, each passing CI)
 
 1. `riglet-render`: `from_device`, `render_to`, view transform, with
-   tests. **Review stop.**
+   tests.
 2. `riglet-editor` library: `EditorState`, commands, history, dirty
-   tracking, atomic save, preservation tests.
+   tracking, atomic save, preservation tests. **Review stop** (both need
+   no UI dependency; eframe and rfd come in 3).
 3. Editor binary: window, open `.riglet` (background load), viewport with
    pan, zoom and fit.
 4. Parameter panel; node tree, selection outline, hide-in-view.

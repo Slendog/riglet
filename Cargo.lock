@@ -896,6 +896,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "riglet-editor"
+version = "0.1.0"
+dependencies = [
+ "riglet-fixtures",
+ "riglet-format",
+ "riglet-inochi2d",
+ "thiserror",
+]
+
+[[package]]
 name = "riglet-fixtures"
 version = "0.1.0"
 dependencies = [

@@ -40,7 +40,8 @@ crates/
   riglet-live2d/    model3/physics3/motion3/exp3 JSON, moc3 module
   riglet-cli/       info / validate / render / import / export (binary `riglet`)
   riglet-fixtures/  dev-only: model Builder + one render fixture per feature
-  riglet-editor/    eframe app
+  riglet-editor/    editor core (document, commands, undo/redo, atomic
+                    save; no UI types) + eframe app (M4)
 fuzz/               one fuzz target per importer
 tools/moc3-re/      Python + Kaitai analysis scripts
 tests/fixtures/     self-made test models only

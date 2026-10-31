@@ -1,0 +1,18 @@
+[package]
+name = "riglet-editor"
+description = "Riglet editor: document state, commands and undo/redo, saving (and, later, the egui UI)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+riglet-format = { path = "../riglet-format" }
+riglet-inochi2d = { path = "../riglet-inochi2d" }
+thiserror.workspace = true
+
+[dev-dependencies]
+riglet-fixtures = { path = "../riglet-fixtures" }
+
+[lints]
+workspace = true
