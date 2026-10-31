@@ -245,8 +245,18 @@ viewport. Codes are filterable. Names from files are shown as plain text.
    Resize the window: the ramp stays sharp (no blur at 100%).
 4. Open Aka and Midori (`.inp`, `.inx`): loading shows a spinner and the
    window stays responsive; Save asks for a `.riglet` and never offers the
-   imported file. Undo/redo menus stay disabled until there are edits
-   (the first edit UI comes in step 4).
+   imported file. Open another file while one loads: only the last one
+   opens.
+5. Parameters: drag sliders and 2D pads (double-click a pad resets);
+   the title shows no unsaved-changes dot. Select a parameter name:
+   rename it, empty the name (an error shows, the model keeps the old
+   name), drag its default and range (one undo step per drag; a range
+   that excludes the default or a key is refused with a tooltip).
+6. Nodes: select one (its mesh is outlined), untick its box (hidden in
+   the viewport only, no dot in the title), toggle Visible in Properties
+   (an undoable edit). Undo and redo everything above.
+7. Windows at 125% and 150% display scaling: the gray ramp at actual size
+   is sharp, with no blurred or doubled rows.
 
 ## 10. Decisions (2026-10-31)
 

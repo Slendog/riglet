@@ -78,3 +78,31 @@ fn hide_in_view_hides_descendants_only_in_the_shown_frame() {
         assert_eq!(d.visible, id_of(d.node) == "a");
     }
 }
+
+/// The outline of a node is the evaluated edges of the drawables at or
+/// under it, each shared edge once, skipping non-finite ends.
+#[test]
+fn outline_edges_cover_the_selection_once() {
+    use riglet_editor::viewport::outline_edges;
+    let mut b = riglet_fixtures::Builder::new();
+    b.group("g", "root", 1.0);
+    b.quad("a", "g", "tex", [0.0, 0.0], [1.0, 1.0]);
+    b.quad("b", "root", "tex", [2.0, 0.0], [3.0, 1.0]);
+    let doc = b.document();
+    let rig = Rig::prepare(&doc, &Limits::default()).unwrap();
+    let mut frame = EvalOutput::new();
+    rig.evaluate(&ParamValues::defaults(&rig), &mut frame);
+    // A quad: 2 triangles, 5 distinct edges (the diagonal once).
+    assert_eq!(outline_edges(&rig, &frame, "a").len(), 5);
+    assert_eq!(outline_edges(&rig, &frame, "g").len(), 5);
+    assert_eq!(outline_edges(&rig, &frame, "root").len(), 10);
+    assert!(outline_edges(&rig, &frame, "nope").is_empty());
+    assert!(outline_edges(&rig, &frame, "b").iter().all(|[p, _]| p[0] >= 2.0));
+    // A non-finite vertex drops the edges that use it (vertex 1 is on
+    // edges 0-1 and 1-2 only).
+    let slot = frame.drawables.iter().position(|d| rig.nodes[d.node].id == "a").unwrap();
+    frame.drawables[slot].positions[1] = [f32::INFINITY, 0.0];
+    let edges = outline_edges(&rig, &frame, "a");
+    assert_eq!(edges.len(), 3);
+    assert!(edges.iter().flatten().flatten().all(|v| v.is_finite()));
+}

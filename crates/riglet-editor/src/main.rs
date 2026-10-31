@@ -5,13 +5,16 @@
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod panels;
+
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, Pos2, Rect, Sense, Vec2};
 use eframe::{egui_wgpu, wgpu};
-use riglet_editor::viewport::pixel_rect;
+use riglet_editor::viewport::{outline_edges, pixel_rect};
 use riglet_editor::{EditorState, LoadError, Loader, SaveError, Viewport};
 use riglet_format::Limits;
 use riglet_render::{Budgets, Renderer};
@@ -70,8 +73,18 @@ enum Pending {
 struct Shown {
     texture: egui::TextureId,
     target_generation: u64,
-    /// (gpu generation, frame version, zoom, pan, width, height).
-    key: Option<(u64, u64, f32, [f32; 2], u32, u32)>,
+    key: Option<FrameKey>,
+}
+
+/// Everything the viewport image depends on: re-render when it changes.
+#[derive(Clone, PartialEq)]
+struct FrameKey {
+    gpu_generation: u64,
+    frame_version: u64,
+    zoom: f32,
+    pan: [f32; 2],
+    size: (u32, u32),
+    hidden: BTreeSet<String>,
 }
 
 struct App {
@@ -80,6 +93,7 @@ struct App {
     shown: Option<Shown>,
     state: Option<EditorState>,
     loader: Loader,
+    edits: panels::Edits,
     pending: Option<Pending>,
     error: Option<String>,
     render_error: Option<String>,
@@ -99,6 +113,7 @@ impl App {
             shown: None,
             state: None,
             loader: Loader::new(Limits::default()),
+            edits: panels::Edits::default(),
             pending: None,
             error: None,
             render_error: None,
@@ -139,6 +154,7 @@ impl App {
         match result {
             Ok(loaded) => {
                 self.state = Some(EditorState::open(loaded, self.loader.limits().clone()));
+                self.edits = panels::Edits::default();
                 self.viewport.clear();
                 self.needs_fit = true;
                 self.render_error = None;
@@ -189,12 +205,14 @@ impl App {
     }
 
     fn undo(&mut self) {
+        self.edits.reset();
         if let Some(Err(e)) = self.state.as_mut().map(EditorState::undo) {
             self.error = Some(format!("Could not undo: {e}"));
         }
     }
 
     fn redo(&mut self) {
+        self.edits.reset();
         if let Some(Err(e)) = self.state.as_mut().map(EditorState::redo) {
             self.error = Some(format!("Could not redo: {e}"));
         }
@@ -375,8 +393,15 @@ impl App {
             }
         }
 
-        let key = (state.gpu_generation(), state.frame_version(), state.view.zoom, state.view.pan, w, h);
-        if self.shown.as_ref().and_then(|s| s.key) != Some(key) {
+        let key = FrameKey {
+            gpu_generation: state.gpu_generation(),
+            frame_version: state.frame_version(),
+            zoom: state.view.zoom,
+            pan: state.view.pan,
+            size: (w, h),
+            hidden: state.view.hidden.clone(),
+        };
+        if self.shown.as_ref().and_then(|s| s.key.as_ref()) != Some(&key) {
             let start = Instant::now();
             match self.viewport.render(state, w, h) {
                 Ok(_) => {
@@ -384,7 +409,7 @@ impl App {
                     self.render_error = None;
                     self.register_target();
                     if let Some(s) = self.shown.as_mut() {
-                        s.key = Some(key);
+                        s.key = Some(key.clone());
                     }
                 }
                 Err(e) => {
@@ -400,6 +425,15 @@ impl App {
         {
             let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
             painter.image(s.texture, shown_rect, uv, Color32::WHITE);
+        }
+        // Selection outline: evaluated mesh edges, drawn by egui on top.
+        if let Some(state) = self.state.as_mut()
+            && let Some(node) = state.view.selection.clone()
+        {
+            let (zoom, pan) = (state.view.zoom, state.view.pan);
+            let (rig, frame) = state.frame();
+            let edges = outline_edges(rig, frame, &node);
+            panels::draw_outline(&painter, &edges, zoom, center, pan, ppp);
         }
     }
 
@@ -495,6 +529,22 @@ impl eframe::App for App {
 
         egui::Panel::top("menu").show(ui, |ui| self.menu(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+        if let Some(state) = self.state.as_mut() {
+            egui::Panel::left("nodes").resizable(true).default_size(260.0).show(ui, |ui| {
+                panels::node_tree(ui, state);
+            });
+            let edits = &mut self.edits;
+            egui::Panel::right("parameters").resizable(true).default_size(300.0).show(ui, |ui| {
+                egui::Panel::bottom("properties").resizable(true).default_size(260.0).show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("riglet properties").show(ui, |ui| {
+                        panels::properties(ui, state, edits);
+                    });
+                });
+                egui::ScrollArea::vertical().id_salt("riglet parameters").auto_shrink([false, false]).show(ui, |ui| {
+                    panels::parameters(ui, state, edits);
+                });
+            });
+        }
         egui::CentralPanel::no_frame().show(ui, |ui| self.viewport_ui(ui));
         self.dialogs(&ctx);
     }

@@ -138,3 +138,48 @@ pub fn pixel_rect(min: [f32; 2], max: [f32; 2], pixels_per_point: f32) -> PixelR
     let height = (y1 - y0).max(0.0) as u32;
     PixelRect { origin: [x0, y0], width, height, min_points: [x0 / ppp, y0 / ppp], max_points: [x1 / ppp, y1 / ppp] }
 }
+
+/// Most outline edges drawn for one selection (a whole-model selection of
+/// a large model is drawn up to this many).
+pub const MAX_OUTLINE_EDGES: usize = 200_000;
+
+/// The evaluated mesh edges (model space) of every drawable at or under
+/// `node`, each shared edge once, skipping edges with a non-finite end
+/// (E10), at most [`MAX_OUTLINE_EDGES`].
+pub fn outline_edges(rig: &Rig, frame: &EvalOutput, node: &str) -> Vec<[[f32; 2]; 2]> {
+    let Some(top) = rig.node_index(node) else { return Vec::new() };
+    // Pre-order: descendants follow their ancestor.
+    let mut under = vec![false; rig.nodes.len()];
+    for (i, n) in rig.nodes.iter().enumerate() {
+        let parent = n.parent.and_then(|p| under.get(p).copied()).unwrap_or(false);
+        if let Some(u) = under.get_mut(i) {
+            *u = i == top || parent;
+        }
+    }
+    let mut edges = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for d in &frame.drawables {
+        if !under.get(d.node).copied().unwrap_or(false) {
+            continue;
+        }
+        let Some(riglet_format::rig::RigKind::Drawable { indices, .. }) = rig.nodes.get(d.node).map(|n| &n.kind) else {
+            continue;
+        };
+        seen.clear();
+        for &[i, j, k] in indices.as_chunks::<3>().0 {
+            for (a, b) in [(i, j), (j, k), (k, i)] {
+                if !seen.insert((a.min(b), a.max(b))) {
+                    continue;
+                }
+                let (Some(p), Some(q)) = (d.positions.get(a as usize), d.positions.get(b as usize)) else { continue };
+                if p.iter().chain(q).all(|v| v.is_finite()) {
+                    edges.push([*p, *q]);
+                    if edges.len() >= MAX_OUTLINE_EDGES {
+                        return edges;
+                    }
+                }
+            }
+        }
+    }
+    edges
+}
