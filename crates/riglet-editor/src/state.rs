@@ -49,6 +49,9 @@ pub enum LoadError {
     Import { path: PathBuf, source: riglet_inochi2d::InochiError },
     #[error("{path} is not a valid model ({} issue(s))", issues.len())]
     Invalid { path: PathBuf, issues: Vec<Issue> },
+    /// A bug in a reader (it panicked); reported instead of crashing.
+    #[error("{path}: internal error while loading: {message}")]
+    Internal { path: PathBuf, message: String },
 }
 
 const ZIP_MAGIC: &[u8] = b"PK\x03\x04";

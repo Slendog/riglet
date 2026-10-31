@@ -7,12 +7,12 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Instant;
 
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, Pos2, Rect, Sense, Vec2};
 use eframe::{egui_wgpu, wgpu};
-use riglet_editor::{EditorState, LoadError, Loaded, SaveError, Viewport, load};
+use riglet_editor::viewport::pixel_rect;
+use riglet_editor::{EditorState, LoadError, Loader, SaveError, Viewport};
 use riglet_format::Limits;
 use riglet_render::{Budgets, Renderer};
 
@@ -79,8 +79,7 @@ struct App {
     viewport: Viewport,
     shown: Option<Shown>,
     state: Option<EditorState>,
-    limits: Limits,
-    loading: Option<(PathBuf, Receiver<Result<Loaded, LoadError>>)>,
+    loader: Loader,
     pending: Option<Pending>,
     error: Option<String>,
     render_error: Option<String>,
@@ -99,8 +98,7 @@ impl App {
             viewport: Viewport::new(renderer),
             shown: None,
             state: None,
-            limits: Limits::default(),
-            loading: None,
+            loader: Loader::new(Limits::default()),
             pending: None,
             error: None,
             render_error: None,
@@ -108,8 +106,9 @@ impl App {
             render_ms: 0.0,
             quitting: false,
         };
+        // Same path as File > Open and drag and drop.
         if let Some(path) = initial {
-            app.start_load(path, &cc.egui_ctx);
+            app.request_open(path, &cc.egui_ctx);
         }
         Ok(app)
     }
@@ -127,40 +126,24 @@ impl App {
         }
     }
 
-    /// Loads on a background thread; the window stays responsive and the
-    /// current model stays open until the new one is ready.
+    /// Loads on a background thread (see `Loader`): the window stays
+    /// responsive, the current model stays open until the new one is
+    /// ready, and a newer request supersedes an older one.
     fn start_load(&mut self, path: PathBuf, ctx: &egui::Context) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let limits = self.limits.clone();
         let ctx = ctx.clone();
-        let p = path.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(load(&p, &limits));
-            ctx.request_repaint();
-        });
-        self.loading = Some((path, rx));
+        self.loader.start(path, move || ctx.request_repaint());
     }
 
     fn poll_load(&mut self) {
-        let Some((path, rx)) = &self.loading else { return };
-        match rx.try_recv() {
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => {
-                self.error = Some(format!("loading {} stopped unexpectedly", path.display()));
-                self.loading = None;
+        let Some((_, result)) = self.loader.poll() else { return };
+        match result {
+            Ok(loaded) => {
+                self.state = Some(EditorState::open(loaded, self.loader.limits().clone()));
+                self.viewport.clear();
+                self.needs_fit = true;
+                self.render_error = None;
             }
-            Ok(result) => {
-                self.loading = None;
-                match result {
-                    Ok(loaded) => {
-                        self.state = Some(EditorState::open(loaded, self.limits.clone()));
-                        self.viewport.clear();
-                        self.needs_fit = true;
-                        self.render_error = None;
-                    }
-                    Err(e) => self.error = Some(load_error_text(&e)),
-                }
-            }
+            Err(e) => self.error = Some(load_error_text(&e)),
         }
     }
 
@@ -313,7 +296,7 @@ impl App {
             let a = self.viewport.renderer().adapter();
             ui.label(format!("{} ({})", a.name, a.backend));
             ui.separator();
-            if let Some((path, _)) = &self.loading {
+            if let Some(path) = self.loader.loading() {
                 ui.spinner();
                 ui.label(format!("Loading {}…", file_name(path)));
                 ui.separator();
@@ -337,17 +320,17 @@ impl App {
     fn viewport_ui(&mut self, ui: &mut egui::Ui) {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let ppp = ui.ctx().pixels_per_point();
-        // Align to physical pixels, so each texel lands on one screen pixel
-        // (nearest sampling, no resampling of the renderer's bytes).
-        let min = (rect.min.to_vec2() * ppp).round();
-        let max = (rect.max.to_vec2() * ppp).round();
-        let (w, h) = ((max.x - min.x).max(0.0) as u32, (max.y - min.y).max(0.0) as u32);
-        let shown_rect = Rect::from_min_max((min / ppp).to_pos2(), (max / ppp).to_pos2());
+        // Snapped to physical pixels, so each texel lands on one screen
+        // pixel (nearest sampling, no resampling of the renderer's bytes).
+        let px = pixel_rect([rect.min.x, rect.min.y], [rect.max.x, rect.max.y], ppp);
+        let (w, h) = (px.width, px.height);
+        let shown_rect = Rect::from_min_max(Pos2::from(px.min_points), Pos2::from(px.max_points));
+        let center = Vec2::new(px.origin[0] + w as f32 * 0.5, px.origin[1] + h as f32 * 0.5);
         let painter = ui.painter_at(rect);
 
         let Some(state) = self.state.as_mut() else {
             painter.rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
-            let text = if self.loading.is_some() {
+            let text = if self.loader.loading().is_some() {
                 "Loading…"
             } else {
                 "Open a .riglet, .inp or .inx file (or drop it here)"
@@ -380,7 +363,7 @@ impl App {
             if factor != 1.0
                 && let Some(p) = response.hover_pos()
             {
-                let c = (p.to_vec2() * ppp) - (min + max) * 0.5;
+                let c = (p.to_vec2() * ppp) - center;
                 state.view.zoom_about(factor, [c.x, c.y]);
             }
         }
@@ -488,7 +471,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_load();
-        if self.loading.is_some() {
+        if self.loader.loading().is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         // Dropped files open like picked ones (the first one only).

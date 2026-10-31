@@ -22,6 +22,9 @@ rfd.workspace = true
 
 [dev-dependencies]
 riglet-fixtures = { path = "../riglet-fixtures" }
+serde_json.workspace = true
+# Live GPU object counts for the allocation-bound test (test builds only).
+wgpu = { workspace = true, features = ["counters"] }
 
 [lints]
 workspace = true

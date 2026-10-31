@@ -4,12 +4,14 @@
 
 pub mod command;
 pub mod history;
+pub mod loader;
 pub mod save;
 pub mod state;
 pub mod viewport;
 
 pub use command::{Command, CommandError, Gesture, MAX_NAME_BYTES, Merge};
 pub use history::{History, HistoryLimits};
+pub use loader::{LoadFn, Loader};
 pub use save::write_atomic;
 pub use state::{EditorState, LoadError, Loaded, MAX_ZOOM, MIN_ZOOM, SaveError, Source, SourceKind, ViewState, load};
 pub use viewport::{Viewport, frame_options};

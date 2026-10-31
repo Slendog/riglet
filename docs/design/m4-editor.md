@@ -78,12 +78,19 @@ The editor uses the renderer's code path (R1). Changes in `riglet-render`
    gives R7's mapping exactly; R7 stays the rule for exported images and
    gets a non-normative note.
 
-The viewport texture is registered with egui-wgpu and shown directly
+The viewport area is snapped to whole physical pixels (`pixel_rect`), so
+at fractional scale factors (1.25, 1.5, ...) each texel still lands on
+exactly one screen pixel with nearest sampling; a test checks this for
+seven scale factors and many panel positions. The viewport texture is
+registered with egui-wgpu and shown directly
 every frame; it is never read back to the CPU (`read_target` is for the
 CLI and tests). It is re-rendered only when something changed (parameter,
 view, model, window size). The renderer keeps its offscreen layers and
-mask buffers for the last frame size and reuses them (every pass clears
-them first); a failed frame drops them. Budgets still apply: the viewport size is capped by `Budgets::max_output_dimension`
+mask buffers for the current frame size only (one entry, replaced on a
+resize) and reuses them (every pass clears
+them first); a failed frame drops them. Tests resize through 300 sizes
+and check with wgpu's object counters that textures and texture memory
+stay bounded, for the renderer and for the editor viewport. Budgets still apply: the viewport size is capped by `Budgets::max_output_dimension`
 and the adapter's limits; errors show in the status bar.
 
 **Color check.** egui composites the viewport texture into its UI, so a
@@ -97,6 +104,10 @@ next to the CLI's render of it) makes a shift visible in the manual check.
 
 Selection outlines and the mesh wireframe are drawn with egui's painter
 from `EvalOutput` positions, skipping non-finite points (E10).
+
+**Hide in view** marks drawables and composites under a hidden node
+invisible in a copy of the evaluated frame, exactly as model visibility
+would (a hidden mask source still masks); no command, never dirty.
 
 **View-only state** (zoom, pan, background, hide-in-view toggles,
 selection, panel layout, parameter values) lives in memory only. It never
@@ -134,15 +145,29 @@ not own, including another tool's `editor.json`, is kept verbatim on save
   it sets dirty. Reaching equal content by another route stays dirty.
 - M4a commands: `RenameNode`, `SetNodeVisible` (the model's flag, not the
   view-only toggle), `RenameParameter`, `SetParameterGroup`,
-  `SetParameterDefault` (current values become the default).
+  `SetParameterDefault`, `SetParameterRange`.
+- Commands keep the model consistent and refuse otherwise, with a message
+  naming the problem: names must not be empty (or only whitespace); a
+  default must lie inside its range; a range must have min < max, finite,
+  and contain the default and every keyform key on that parameter
+  component (`RangeExcludesKey` names the node). Nothing is moved or
+  clamped silently.
+- Renames change display names only, never ids or export ids (tracking
+  setups bind to those); a test exports before and after renaming and
+  finds only the names changed.
 - All of it is plain Rust and tested without the UI: apply, undo, redo,
   coalescing, the cap, dirty tracking, rejection of invalid results.
 
 ## 6. Loading, saving and recovery
 
-- **Loading** runs on a background thread, so a large or hostile file
-  never freezes the window. It uses the CLI's `Limits`. A failure shows the
-  error (and validation issues) and keeps the current model.
+- **Loading** runs on a background thread (`Loader`), so a large or
+  hostile file never freezes the window. It uses the CLI's `Limits`. A
+  failure shows the error (and validation issues) and keeps the current
+  model. A panic in a reader becomes a `LoadError::Internal` dialog
+  instead of taking the editor down. Each new request supersedes the one
+  in progress, whose result is dropped, so a slow load never replaces a
+  document opened after it. File > Open, drag and drop and the
+  command-line argument all go through the same request.
 - **Saving** is atomic: write to a temporary file in the target's
   directory (so the rename never crosses file systems), sync it, rename it
   over the target (replacing it, Windows included), then sync the

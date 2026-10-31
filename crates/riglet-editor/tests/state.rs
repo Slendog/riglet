@@ -455,3 +455,139 @@ fn view_zoom_pan_and_fit() {
     v.fit((0.0, 0.0), 1000.0, 1000.0);
     assert!(v.zoom.is_finite());
 }
+
+#[test]
+fn renames_reject_empty_names() {
+    let dir = temp_dir("empty_names");
+    let path = write(&dir, "m.riglet", &model().document());
+    let mut s = open(&path);
+    for name in ["", " ", "\t\n"] {
+        assert_eq!(s.apply(rename("q", name), Merge::Never), Err(CommandError::EmptyName));
+        let p = Command::RenameParameter { parameter: "p".into(), name: name.into() };
+        assert_eq!(s.apply(p, Merge::Never), Err(CommandError::EmptyName));
+        let g = Command::SetParameterGroup { parameter: "p".into(), group: Some(name.into()) };
+        assert_eq!(s.apply(g, Merge::Never), Err(CommandError::EmptyName), "use None for no group");
+    }
+    s.apply(Command::SetParameterGroup { parameter: "p".into(), group: None }, Merge::Never).unwrap();
+    assert_eq!(s.document().model.nodes["q"].base().name, "q");
+}
+
+/// Range and default edits keep the default and every keyform key inside
+/// the range, or are refused with a message naming what is in the way.
+#[test]
+fn range_and_default_edits_keep_the_model_consistent() {
+    let dir = temp_dir("ranges");
+    // `p` has keys 0 and 1 on node q; default 0; range [-1, 1].
+    let path = write(&dir, "m.riglet", &model().document());
+    let mut s = open(&path);
+    let range =
+        |min: f32, max: f32| Command::SetParameterRange { parameter: "p".into(), min: vec![min], max: vec![max] };
+    let before = s.document().clone();
+
+    let refused = [
+        (range(1.0, -1.0), CommandError::BadRange("p".into())),
+        (range(0.0, 0.0), CommandError::BadRange("p".into())),
+        (range(f32::NEG_INFINITY, 1.0), CommandError::BadRange("p".into())),
+        (range(f32::NAN, 1.0), CommandError::BadRange("p".into())),
+        (
+            Command::SetParameterRange { parameter: "p".into(), min: vec![-1.0, -1.0], max: vec![1.0, 1.0] },
+            CommandError::BadRange("p".into()),
+        ),
+        (range(0.5, 2.0), CommandError::RangeExcludesDefault { parameter: "p".into(), default: 0.0 }),
+        (range(-2.0, 0.5), CommandError::RangeExcludesKey { parameter: "p".into(), node: "q".into(), key: 1.0 }),
+        (
+            Command::SetParameterRange { parameter: "nope".into(), min: vec![0.0], max: vec![1.0] },
+            CommandError::NoParameter("nope".into()),
+        ),
+    ];
+    for (command, want) in refused {
+        let got = s.apply(command.clone(), Merge::Never);
+        assert_eq!(got, Err(want.clone()), "{command:?}");
+        assert!(!want.to_string().is_empty());
+    }
+    assert_eq!(s.document(), &before);
+    assert_eq!(s.history().undo_len(), 0);
+
+    // Allowed: wider, and exactly the keys.
+    s.apply(range(-3.0, 3.0), Merge::Never).unwrap();
+    s.apply(range(0.0, 1.0), Merge::Never).unwrap();
+    assert_eq!(s.rig().params[0].min[0], 0.0);
+    // The default can't leave the range; set it inside, then narrowing
+    // past the old default works.
+    let default = |v: f32| Command::SetParameterDefault { parameter: "p".into(), default: vec![v] };
+    assert_eq!(s.apply(default(1.5), Merge::Never), Err(CommandError::BadDefault("p".into())));
+    s.apply(default(0.5), Merge::Never).unwrap();
+    assert_eq!(
+        s.apply(range(0.0, 0.4), Merge::Never),
+        Err(CommandError::RangeExcludesDefault { parameter: "p".into(), default: 0.5 })
+    );
+    // A 2D parameter is checked per component (xy has no keys).
+    let r2 = |min: [f32; 2], max: [f32; 2]| Command::SetParameterRange {
+        parameter: "xy".into(),
+        min: min.to_vec(),
+        max: max.to_vec(),
+    };
+    assert_eq!(
+        s.apply(r2([-0.5, -1.0], [1.0, 1.0]), Merge::Never),
+        Err(CommandError::RangeExcludesDefault { parameter: "xy".into(), default: -1.0 })
+    );
+    s.apply(r2([-1.0, -2.0], [1.0, 0.0]), Merge::Never).unwrap();
+    // Parameter values follow the new ranges (clamped).
+    assert!(s.set_param("xy", [5.0, 5.0]));
+    assert_eq!(s.param_values().values[1], [1.0, 0.0]);
+    while s.undo().unwrap() {}
+    assert_eq!(s.document(), &before);
+}
+
+/// Renames change display names only: ids, export ids and everything an
+/// export writes stay the same apart from the names themselves.
+#[test]
+fn renames_never_change_ids_or_export_output() {
+    let mut b = model();
+    b.model.export_ids.inochi2d = Some([("q".to_owned(), 4242u32), ("p".to_owned(), 77u32)].into_iter().collect());
+    let dir = temp_dir("rename_export");
+    let path = write(&dir, "m.riglet", &b.document());
+    let mut s = open(&path);
+    let export = |doc: &Document| riglet_inochi2d::export(doc).unwrap();
+    let before = export(s.document());
+    s.apply(rename("q", "Renamed Face 7"), Merge::Never).unwrap();
+    s.apply(Command::RenameParameter { parameter: "p".into(), name: "Renamed Smile 9".into() }, Merge::Never).unwrap();
+    let after = export(s.document());
+    assert_eq!(s.document().model.nodes.keys().collect::<Vec<_>>(), ["q", "root"]);
+    assert_eq!(s.document().model.export_ids, b.model.export_ids);
+    assert_eq!(after.warnings, before.warnings);
+
+    // Same container except for the two names.
+    let limits = Limits::default();
+    let a = riglet_inochi2d::container::parse(&after.bytes, &limits).unwrap();
+    let z = riglet_inochi2d::container::parse(&before.bytes, &limits).unwrap();
+    fn unname(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::String(s) if s == "Renamed Face 7" => *s = "q".into(),
+            serde_json::Value::String(s) if s == "Renamed Smile 9" => *s = "p".into(),
+            serde_json::Value::Array(a) => a.iter_mut().for_each(unname),
+            serde_json::Value::Object(o) => o.values_mut().for_each(unname),
+            _ => {}
+        }
+    }
+    let json = |bytes: &[u8]| serde_json::from_slice::<serde_json::Value>(bytes).unwrap();
+    let (mut ja, jz) = (json(&a.json), json(&z.json));
+    assert_ne!(ja, jz, "the names are in the export");
+    unname(&mut ja);
+    assert_eq!(ja, jz);
+    assert_eq!(a.textures.len(), z.textures.len());
+    for (x, y) in a.textures.iter().zip(&z.textures) {
+        assert_eq!(x.data, y.data);
+    }
+    assert_eq!(a.extensions.len(), z.extensions.len());
+    for ((na, da), (nz, dz)) in a.extensions.iter().zip(&z.extensions) {
+        assert_eq!(na, nz);
+        match (serde_json::from_slice::<serde_json::Value>(da), serde_json::from_slice::<serde_json::Value>(dz)) {
+            (Ok(mut x), Ok(y)) => {
+                unname(&mut x);
+                assert_eq!(x, y, "extension {na}");
+            }
+            _ => assert_eq!(da, dz, "extension {na}"),
+        }
+    }
+}

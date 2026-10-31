@@ -311,6 +311,12 @@ impl Renderer {
         &self.summary
     }
 
+    /// The device frames are rendered on (the caller's, for
+    /// [`Renderer::from_device`]).
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
     pub fn budgets(&self) -> &Budgets {
         &self.budgets
     }
