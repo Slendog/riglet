@@ -232,3 +232,20 @@ fn blend_mode_names_round_trip() {
         assert_eq!(serde_json::from_str::<BlendMode>(&json).unwrap(), *mode);
     }
 }
+
+/// Packages are byte-identical on every OS: every central-directory entry
+/// records Unix as the creating system ("version made by" high byte 3),
+/// never the host's (zip would write DOS on Windows).
+#[test]
+fn packages_record_the_same_system_on_every_os() {
+    let doc = riglet_fixtures::Builder::new().document();
+    let bytes = riglet_format::write_package_bytes(&doc).unwrap();
+    let mut entries = 0;
+    for at in 0..bytes.len().saturating_sub(46) {
+        if bytes[at..at + 4] == *b"PK\x01\x02" {
+            entries += 1;
+            assert_eq!(bytes[at + 5], 3, "entry {entries}: made by system {}", bytes[at + 5]);
+        }
+    }
+    assert!(entries >= 3, "found {entries} central-directory entries");
+}

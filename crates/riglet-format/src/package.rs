@@ -169,10 +169,13 @@ pub fn write_package<W: Write + Seek>(doc: &Document, writer: W) -> Result<W, Pa
     manifest.format = FORMAT_NAME.to_owned();
     manifest.schema_version = CURRENT_SCHEMA_VERSION.to_owned();
 
+    // Fixed time, permissions and "made by" system: the same document gives
+    // the same bytes on every OS (zip otherwise records DOS on Windows).
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .last_modified_time(zip::DateTime::DEFAULT)
-        .unix_permissions(0o644);
+        .unix_permissions(0o644)
+        .system(zip::System::Unix);
 
     let mut zip = zip::ZipWriter::new(writer);
     zip.start_file(MANIFEST_FILE, options)?;
