@@ -1,0 +1,71 @@
+# Manual stress run for the rare STATUS_ACCESS_VIOLATION (0xc0000005) seen
+# once in the riglet-render tests on windows-latest (run 40642645857).
+# Runs the riglet-render test binaries many times on WARP, once with the
+# default parallel test threads and once with --test-threads=1, and counts
+# the runs that fail. Started by hand only; never blocks pushes or PRs.
+name: WARP stress
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: Test runs per mode
+        default: "200"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  stress:
+    name: stress (${{ matrix.mode }})
+    runs-on: windows-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [parallel, serial]
+    env:
+      RIGLET_REQUIRE_GPU: "1"
+      RIGLET_EXPECT_BACKEND: Dx12
+      RIGLET_EXPECT_ADAPTER: Microsoft Basic Render Driver
+      RIGLET_DEVICE_LIMITS: adapter
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo test -p riglet-render --tests --no-run
+      - name: Stress
+        shell: bash
+        env:
+          RUNS: ${{ inputs.runs }}
+          MODE: ${{ matrix.mode }}
+        run: |
+          set -o pipefail
+          [[ "$RUNS" =~ ^[0-9]+$ ]] || { echo "runs must be a number"; exit 2; }
+          threads=""
+          if [ "$MODE" = serial ]; then threads="--test-threads=1"; fi
+          mkdir -p stress
+          failed=0
+          for i in $(seq 1 "$RUNS"); do
+            if ! cargo test -q -p riglet-render --tests -- $threads > "stress/run-$i.log" 2>&1; then
+              failed=$((failed + 1))
+              echo "run $i FAILED:"
+              grep -a -E 'error: test failed|exit code|0xc0000005|STATUS_|panicked' "stress/run-$i.log" | head -n 5
+            else
+              rm "stress/run-$i.log"
+            fi
+          done
+          echo "$MODE: $failed of $RUNS runs failed"
+          echo "- **$MODE**: $failed of $RUNS runs failed" >> "$GITHUB_STEP_SUMMARY"
+          [ "$failed" -eq 0 ]
+      - name: Upload failed run logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: warp-stress-${{ matrix.mode }}
+          path: stress/
+          if-no-files-found: ignore
