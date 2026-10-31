@@ -219,6 +219,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 cargo test --release -p riglet-format --test binding -- --ignored   # worst-case binding time
 cargo run -p riglet-editor -- [FILE]   # the editor; manual check list in docs/design/m4-editor.md
+RIGLET_DATA_DIR=/some/dir cargo run -p riglet-editor   # autosave/recovery in another folder (manual tests)
 RIGLET_WRITE_FIXTURES=1 cargo test -p riglet-cli --test viewport   # rewrite tests/fixtures/gray-ramp.riglet
 # Fuzz from the repo root; corpus/ is gitignored, seeds/ is committed.
 cargo +nightly fuzz run package fuzz/corpus/package fuzz/seeds/package -- -timeout=10 -max_len=16384

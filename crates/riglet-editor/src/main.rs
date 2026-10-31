@@ -1,5 +1,6 @@
 //! Riglet editor (M4a): window, open (background load, native dialog, drag
-//! and drop), viewport with pan, zoom and fit, save and undo. Design:
+//! and drop), viewport with pan, zoom and fit, save and undo, autosave and
+//! crash recovery. Design:
 //! `docs/design/m4-editor.md`. All model logic is in the library
 //! (`EditorState`, `Viewport`); this file is the egui layer.
 
@@ -10,10 +11,11 @@ mod panels;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, Pos2, Rect, Sense, Vec2};
 use eframe::{egui_wgpu, wgpu};
+use riglet_editor::recovery::{self, Autosave, AutosaveStatus, Orphan, Session};
 use riglet_editor::viewport::{outline_edges, pixel_rect};
 use riglet_editor::{EditorState, ExportError, LoadError, Loader, SaveError, Viewport};
 use riglet_format::Limits;
@@ -68,6 +70,8 @@ fn wgpu_options() -> egui_wgpu::WgpuConfiguration {
 enum Pending {
     Open(PathBuf),
     Quit,
+    /// Restore the recovered session in this directory.
+    Restore(PathBuf),
     /// Export over the imported source file: needs a confirmation naming it.
     ExportOverSource(PathBuf),
 }
@@ -106,6 +110,16 @@ struct App {
     show_warnings: bool,
     /// A short result line in the status bar (for example after an export).
     notice: Option<String>,
+    /// `Err`: why autosave is off (no data folder, or it can't be created).
+    autosave: Result<Autosave, String>,
+    /// Sessions of editors that crashed, claimed by this one until restored
+    /// or discarded (left alone, they are offered again next start).
+    recovered: Vec<Orphan>,
+    /// The one being loaded for a restore.
+    restoring: Option<Orphan>,
+    show_recovery: bool,
+    /// The recovered session whose Discard was clicked once (asks again).
+    confirm_discard: Option<PathBuf>,
 }
 
 impl App {
@@ -128,12 +142,68 @@ impl App {
             quitting: false,
             show_warnings: false,
             notice: None,
+            autosave: Err(String::new()),
+            recovered: Vec::new(),
+            restoring: None,
+            show_recovery: false,
+            confirm_discard: None,
         };
+        app.start_recovery();
         // Same path as File > Open and drag and drop.
         if let Some(path) = initial {
             app.request_open(path, &cc.egui_ctx);
         }
         Ok(app)
+    }
+
+    /// Starts this editor's autosave session and claims the sessions that
+    /// crashed editors left behind.
+    fn start_recovery(&mut self) {
+        let Some(root) = recovery::default_root() else {
+            self.autosave = Err("no data folder is known (HOME or LOCALAPPDATA is not set)".into());
+            return;
+        };
+        match Session::start(&root) {
+            Ok(session) => {
+                self.recovered = recovery::orphans(&root, Some(&session));
+                self.autosave = Ok(Autosave::new(session));
+            }
+            Err(e) => {
+                self.autosave = Err(e.to_string());
+                self.recovered = recovery::orphans(&root, None);
+            }
+        }
+        self.show_recovery = !self.recovered.is_empty();
+    }
+
+    /// Restores a recovered session (after asking about unsaved changes).
+    fn request_restore(&mut self, dir: PathBuf, ctx: &egui::Context) {
+        if self.dirty() {
+            self.pending = Some(Pending::Restore(dir));
+        } else {
+            self.start_restore(&dir, ctx);
+        }
+    }
+
+    fn start_restore(&mut self, dir: &Path, ctx: &egui::Context) {
+        let Some(i) = self.recovered.iter().position(|o| o.dir() == dir) else { return };
+        let orphan = self.recovered.remove(i);
+        let model = orphan.model_path();
+        if let Some(previous) = self.restoring.replace(orphan) {
+            self.recovered.push(previous);
+        }
+        self.show_recovery = false;
+        self.start_load(model, ctx);
+    }
+
+    fn discard_recovered(&mut self, dir: &Path) {
+        let Some(i) = self.recovered.iter().position(|o| o.dir() == dir) else { return };
+        if let Err(e) = self.recovered.remove(i).discard() {
+            self.error = Some(format!("Could not remove the recovered changes in {}: {e}", dir.display()));
+        }
+        if self.recovered.is_empty() {
+            self.show_recovery = false;
+        }
     }
 
     fn dirty(&self) -> bool {
@@ -158,19 +228,68 @@ impl App {
     }
 
     fn poll_load(&mut self) {
-        let Some((_, result)) = self.loader.poll() else { return };
+        let Some((path, result)) = self.loader.poll() else { return };
+        let restoring = match self.restoring.take() {
+            Some(o) if o.model_path() == path => Some(o),
+            Some(o) => {
+                // Superseded by another open: still offered.
+                self.recovered.push(o);
+                None
+            }
+            None => None,
+        };
         match result {
             Ok(loaded) => {
                 let has_warnings = loaded.document.manifest.provenance.iter().any(|p| !p.warnings.is_empty());
-                self.state = Some(EditorState::open(loaded, self.loader.limits().clone()));
+                let limits = self.loader.limits().clone();
+                self.state = Some(match &restoring {
+                    Some(o) => {
+                        let record = o.record.as_ref();
+                        let source = record.and_then(|r| r.source());
+                        let save_path = record.and_then(|r| r.save_path());
+                        EditorState::open_recovered(loaded, source, save_path, limits)
+                    }
+                    None => EditorState::open(loaded, limits),
+                });
                 self.edits = panels::Edits::default();
                 self.show_warnings = has_warnings;
                 self.notice = None;
                 self.viewport.clear();
                 self.needs_fit = true;
                 self.render_error = None;
+                if let Some(orphan) = restoring {
+                    self.finish_restore(orphan);
+                }
             }
-            Err(e) => self.error = Some(load_error_text(&e)),
+            Err(e) => {
+                self.error = Some(load_error_text(&e));
+                if let Some(o) = restoring {
+                    self.recovered.push(o);
+                }
+            }
+        }
+    }
+
+    /// The restored changes are open: copy them into this editor's session
+    /// first, and only then remove the old one, so a crash in between
+    /// never loses them.
+    fn finish_restore(&mut self, orphan: Orphan) {
+        let Some(state) = self.state.as_ref() else { return };
+        match self.autosave.as_mut() {
+            Ok(autosave) => match autosave.write_now(state) {
+                Ok(()) => match orphan.discard() {
+                    Ok(()) => self.notice = Some("Restored unsaved changes".into()),
+                    Err(e) => self.notice = Some(format!("Restored; the old copy stays: {e}")),
+                },
+                Err(e) => {
+                    self.notice = Some(format!("Restored; the recovered copy is kept until saved ({e})"));
+                    self.recovered.push(orphan);
+                }
+            },
+            Err(_) => {
+                self.notice = Some("Restored; the recovered copy is kept (autosave is off)".into());
+                self.recovered.push(orphan);
+            }
         }
     }
 
@@ -328,6 +447,10 @@ impl App {
                     self.export_dialog();
                 }
                 ui.separator();
+                if ui.add_enabled(!self.recovered.is_empty(), egui::Button::new("Recovered Changes…")).clicked() {
+                    self.show_recovery = true;
+                }
+                ui.separator();
                 if ui.button("Quit").clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
@@ -393,6 +516,31 @@ impl App {
                 if state.is_dirty() {
                     ui.separator();
                     ui.label("unsaved changes");
+                }
+            }
+            match &self.autosave {
+                Ok(a) => match a.status() {
+                    AutosaveStatus::Idle => {}
+                    AutosaveStatus::Writing => {
+                        ui.separator();
+                        ui.label("autosaving…");
+                    }
+                    AutosaveStatus::Saved(at) => {
+                        ui.separator();
+                        ui.label("autosaved").on_hover_text(format!(
+                            "A recovery copy was written {} to {}",
+                            ago(*at),
+                            a.session_dir().display()
+                        ));
+                    }
+                    AutosaveStatus::Failed(e) => {
+                        ui.separator();
+                        ui.colored_label(Color32::from_rgb(220, 80, 60), "autosave failed").on_hover_text(e);
+                    }
+                },
+                Err(e) => {
+                    ui.separator();
+                    ui.colored_label(Color32::from_rgb(220, 80, 60), "autosave off").on_hover_text(e);
                 }
             }
             if let Some(n) = &self.notice {
@@ -573,38 +721,150 @@ impl App {
             return;
         }
         if self.pending.is_some() {
+            #[derive(Clone, Copy, PartialEq)]
+            enum Choice {
+                Save,
+                Discard,
+                Cancel,
+            }
             let mut choice = None;
+            let name =
+                self.state.as_ref().map_or_else(String::new, |s| file_name(s.save_path().unwrap_or(&s.source().path)));
             egui::Modal::new(egui::Id::unique("riglet unsaved dialog")).show(ctx, |ui| {
-                ui.heading("Unsaved changes");
-                ui.label("The open model has changes that are not saved.");
+                ui.set_max_width(480.0);
+                ui.heading(format!("Save changes to {name}?"));
+                ui.label("The open model has changes that are not saved. Discarding them cannot be undone.");
                 ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        choice = Some(Choice::Save);
+                    }
                     if ui.button("Discard changes").clicked() {
-                        choice = Some(true);
+                        choice = Some(Choice::Discard);
                     }
                     if ui.button("Cancel").clicked() {
-                        choice = Some(false);
+                        choice = Some(Choice::Cancel);
                     }
                 });
             });
-            match (choice, self.pending.take()) {
-                (Some(true), Some(Pending::Open(path))) => self.start_load(path, ctx),
-                (Some(true), Some(Pending::Quit)) => {
+            let Some(choice) = choice else { return };
+            let Some(pending) = self.pending.take() else { return };
+            if choice == Choice::Cancel {
+                return;
+            }
+            if choice == Choice::Save {
+                // Save, or Save As for a model without a .riglet; a
+                // cancelled dialog or a failed save cancels the action.
+                self.save();
+                if self.dirty() {
+                    return;
+                }
+            }
+            match pending {
+                Pending::Open(path) => self.start_load(path, ctx),
+                Pending::Restore(dir) => self.start_restore(&dir, ctx),
+                Pending::Quit => {
                     self.quitting = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
-                (Some(_), _) => {}
-                (None, p) => self.pending = p,
+                Pending::ExportOverSource(_) => {}
             }
+            return;
+        }
+        if self.show_recovery {
+            self.recovery_dialog(ctx);
+        }
+    }
+
+    /// Offers each recovered session: restore it, discard it (asks once
+    /// more), or decide later (File > Recovered Changes…).
+    fn recovery_dialog(&mut self, ctx: &egui::Context) {
+        enum Action {
+            Restore(PathBuf),
+            Discard(PathBuf),
+            ConfirmDiscard(PathBuf),
+            Later,
+        }
+        let mut action = None;
+        let confirm = self.confirm_discard.clone();
+        egui::Modal::new(egui::Id::unique("riglet recovery dialog")).show(ctx, |ui| {
+            ui.set_max_width(560.0);
+            ui.heading("Recover unsaved changes");
+            ui.label("Riglet did not close normally. These changes were saved automatically and can be restored.");
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                for o in &self.recovered {
+                    ui.separator();
+                    let name = o.record.as_ref().map_or_else(|| "an unnamed model".into(), |r| r.display_name());
+                    ui.strong(name);
+                    let when = o.modified.map_or_else(|| "at an unknown time".into(), ago);
+                    match o.record.as_ref().and_then(|r| r.save_path.as_deref().or(r.source_path.as_deref())) {
+                        Some(original) => ui.label(format!("{original}, autosaved {when}")),
+                        None => ui.label(format!("Original file unknown, autosaved {when}")),
+                    };
+                    ui.horizontal(|ui| {
+                        if ui.button("Restore").clicked() {
+                            action = Some(Action::Restore(o.dir().to_owned()));
+                        }
+                        if confirm.as_deref() == Some(o.dir()) {
+                            if ui.button("Discard: cannot be undone").clicked() {
+                                action = Some(Action::Discard(o.dir().to_owned()));
+                            }
+                        } else if ui.button("Discard…").clicked() {
+                            action = Some(Action::ConfirmDiscard(o.dir().to_owned()));
+                        }
+                    });
+                }
+            });
+            ui.separator();
+            if ui.button("Decide later").on_hover_text("Kept; File > Recovered Changes… shows this again").clicked() {
+                action = Some(Action::Later);
+            }
+        });
+        match action {
+            Some(Action::Restore(dir)) => {
+                self.confirm_discard = None;
+                self.request_restore(dir, ctx);
+            }
+            Some(Action::Discard(dir)) => {
+                self.confirm_discard = None;
+                self.discard_recovered(&dir);
+            }
+            Some(Action::ConfirmDiscard(dir)) => self.confirm_discard = Some(dir),
+            Some(Action::Later) => {
+                self.confirm_discard = None;
+                self.show_recovery = false;
+            }
+            None => {}
         }
     }
 }
 
 impl eframe::App for App {
+    /// A clean exit (nothing unsaved, or the user chose to discard it)
+    /// removes this editor's recovery session. Any other exit keeps it, so
+    /// the next start offers the changes.
+    fn on_exit(&mut self) {
+        let clean = self.quitting || !self.dirty();
+        if clean && let Ok(autosave) = std::mem::replace(&mut self.autosave, Err(String::new())) {
+            let _ = autosave.close();
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_load();
         if self.loader.loading().is_some() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        if let Ok(autosave) = self.autosave.as_mut() {
+            autosave.tick(self.state.as_ref(), Instant::now());
+            // Wake up for the next copy (or to collect a running one) even
+            // when nothing else happens.
+            if matches!(autosave.status(), AutosaveStatus::Writing) {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            } else if self.state.as_ref().is_some_and(EditorState::is_dirty) {
+                ctx.request_repaint_after(Duration::from_secs(5));
+            }
         }
         // Dropped files open like picked ones (the first one only).
         if let Some(path) = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_owned())) {
@@ -653,6 +913,19 @@ impl eframe::App for App {
         egui::CentralPanel::no_frame().show(ui, |ui| self.viewport_ui(ui));
         self.dialogs(&ctx);
     }
+}
+
+/// "3 minutes ago" and the like, for recovery times.
+fn ago(at: SystemTime) -> String {
+    let Ok(age) = SystemTime::now().duration_since(at) else { return "just now".into() };
+    let s = age.as_secs();
+    let (n, unit) = match s {
+        0..60 => return "just now".into(),
+        60..3600 => (s / 60, "minute"),
+        3600..86_400 => (s / 3600, "hour"),
+        _ => (s / 86_400, "day"),
+    };
+    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
 }
 
 fn file_name(path: &Path) -> String {

@@ -73,6 +73,12 @@ impl History {
         self.undo.last().map_or(self.base, |s| s.id)
     }
 
+    /// Identifies the document's current state within this history: equal
+    /// ids mean the same edits (autosave writes a copy only when it moved).
+    pub fn state_id(&self) -> u64 {
+        self.current()
+    }
+
     fn fresh_id(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);

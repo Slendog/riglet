@@ -189,15 +189,48 @@ not own, including another tool's `editor.json`, is kept verbatim on save
   ZIP field the host could otherwise set (made-by Unix, DOS time
   1980-01-01 00:00, 0644 files and 0755 directories, no flags, extra
   fields or comments); a test checks each entry.
-- **Autosave and crash recovery:** while the document is dirty, a
-  recovery copy is written every 60 seconds (atomically, as a `.riglet`)
-  to the editor's data directory, with a small JSON record of the
-  original path and time. A clean save or a clean close removes it. At
-  start, existing recovery copies are offered: restore (opens as a new,
-  dirty document with the original path remembered) or discard. Recovery
-  files are read through the same parsers and limits as any other file.
-  Autosave never writes over the user's file.
-- Closing or opening another file with unsaved changes asks first.
+- **Autosave and crash recovery** (`recovery.rs`): each running editor
+  owns a session folder, `<data dir>/recovery/<pid>-<nanos>-<n>/`, and
+  holds an exclusive lock on its `lock` file (`File::try_lock`) while it
+  runs. The data dir is `RIGLET_DATA_DIR` if set, else
+  `~/Library/Application Support/Riglet` (macOS), `%LOCALAPPDATA%\Riglet`
+  (Windows), `$XDG_DATA_HOME/riglet` or `~/.local/share/riglet` (Linux);
+  folders are owner-only on Unix. Without one, autosave is off and the
+  status bar says why.
+  - While the document is dirty, a copy (`model.riglet`) and a JSON
+    record (`record.json`: absolute source path and kind, save path,
+    time) are written atomically on a background thread, at most once per
+    60 seconds and only when the document changed. The first copy comes
+    60 seconds after the first unsaved change. An import is dirty from
+    the start, so it gets a copy too.
+  - The copy is removed when the document becomes clean (Save, or undo
+    back to the saved state), when another document is opened, and with
+    the whole session on a clean exit (nothing unsaved, or the user chose
+    Discard). Autosave never writes anywhere else, so never over the
+    user's file.
+  - At start, sessions whose lock can be taken are orphans (the OS
+    releases a lock when its process dies, so a running editor's session
+    is never offered). The new editor keeps each orphan locked, so a
+    second editor starting at the same time doesn't offer it too. A
+    dialog lists them with the original file and age: **Restore**,
+    **Discard** (asks once more) or **Decide later** (File > Recovered
+    Changes… shows it again; unclaimed at exit, offered next start).
+  - Restore loads the copy through the background loader, with the same
+    parsers and limits as any file, and opens it with
+    `EditorState::open_recovered`: dirty, with the recorded source (so
+    Save still never writes over an imported file and Export over it still
+    asks) and save path (only a `.riglet`). The restored changes are
+    written to the new session before the old one is removed, so a crash
+    in between loses nothing.
+  - The folder is the user's, but its contents are read as untrusted:
+    only `<digits>-<digits>-<digits>` folders, never through links,
+    records capped at 64 KiB and ignored when malformed (the copy is then
+    restored without its original path), sessions without a copy removed,
+    and removal deletes only the session's own files.
+- **Unsaved changes:** opening another file, restoring a recovered copy
+  or quitting with unsaved changes asks "Save changes to <file>?" with
+  Save (Save As for a model without a `.riglet`; a cancelled dialog or a
+  failed save cancels the action), Discard changes or Cancel.
 
 ## 7. Warnings panel
 
@@ -297,6 +330,19 @@ and 4 were not reported separately.
 10. Drag `Head:: Yaw-Pitch` on Midori.inp to a corner: if the broken
     Creator values overflow, a live E10 entry appears and goes away when
     the pad returns to the center, without flickering.
+11. Autosave: open Aka.inp (an import is unsaved from the start), wait
+    over a minute: the status bar says "autosaved" (hover shows the
+    folder). Force-quit the editor (Activity Monitor, Task Manager or
+    `kill -9`). Start it again: the recovery dialog lists Aka.inp with its
+    path. Restore: the model opens with unsaved changes; Save proposes a
+    `.riglet` next to Aka.inp, never Aka.inp itself.
+12. Repeat 11 but choose Discard twice: the dialog closes and the next
+    start offers nothing. Repeat with Decide later: File > Recovered
+    Changes… shows it again, and so does the next start.
+13. With unsaved changes, Quit: "Save changes to …?" Save on an import
+    opens Save As; cancelling it keeps the editor open. Discard changes
+    quits, and the next start offers nothing. Start two editors at once
+    after a crash: only one offers the recovered changes.
 
 ## 10. Decisions (2026-10-31)
 
@@ -324,6 +370,7 @@ and 4 were not reported separately.
 5. Inochi2D export (atomic, source confirmation), the warnings panel
    (import, export, live E10; linked, stale-safe), ZIP determinism.
 6. Autosave and crash recovery (not in the editor core commit),
-   unsaved-changes prompts, save dialogs.
+   unsaved-changes prompts, save dialogs. Done: `recovery.rs`, tests in
+   `tests/recovery.rs`, manual checklist items 11-13.
 
 **Review stop** at the end of M4a, with the manual checklist.

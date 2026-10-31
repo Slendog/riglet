@@ -196,6 +196,8 @@ pub struct EditorState {
     /// Bumped whenever the evaluated frame may change (rig or parameter
     /// values), so the UI re-renders only when needed.
     frame_version: u64,
+    /// Unique per opened document (autosave tells documents apart by it).
+    instance: u64,
     pub view: ViewState,
 }
 
@@ -214,16 +216,37 @@ impl EditorState {
     }
 
     pub fn open_with(loaded: Loaded, limits: Limits, history: HistoryLimits) -> Self {
+        let is_riglet = loaded.source.kind == SourceKind::Riglet;
+        let save_path = is_riglet.then(|| loaded.source.path.clone());
+        Self::build(loaded, limits, History::new(history, is_riglet), save_path)
+    }
+
+    /// Opens a recovery copy (read with [`load`] like any file) as the
+    /// document it was a copy of: `source` and `save_path` come from the
+    /// recovery record, so Save writes where it would have before the crash
+    /// and still never writes over an imported file. Starts dirty: the
+    /// restored changes are not in the user's file yet. Without a recorded
+    /// source the copy itself is the source and there is no save path.
+    pub fn open_recovered(loaded: Loaded, source: Option<Source>, save_path: Option<PathBuf>, limits: Limits) -> Self {
+        let mut loaded = loaded;
+        if let Some(source) = source {
+            loaded.source = source;
+        }
+        // Only a .riglet is ever a save path (as for `save_as`).
+        let save_path = save_path.filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("riglet")));
+        Self::build(loaded, limits, History::new(HistoryLimits::default(), false), save_path)
+    }
+
+    fn build(loaded: Loaded, limits: Limits, history: History, save_path: Option<PathBuf>) -> Self {
         let Loaded { document, rig, source, import_warnings } = loaded;
-        let is_riglet = source.kind == SourceKind::Riglet;
         let params = ParamValues::defaults(&rig);
         EditorState {
             document,
             rig,
             limits,
-            save_path: is_riglet.then(|| source.path.clone()),
+            save_path,
             source,
-            history: History::new(history, is_riglet),
+            history,
             params,
             eval: EvalOutput::new(),
             eval_stale: true,
@@ -232,6 +255,7 @@ impl EditorState {
             next_gesture: 0,
             gpu_generation: next_gpu_generation(),
             frame_version: 0,
+            instance: next_gpu_generation(),
             view: ViewState::default(),
         }
     }
@@ -242,6 +266,11 @@ impl EditorState {
 
     pub fn rig(&self) -> &Rig {
         &self.rig
+    }
+
+    /// Unique per opened document.
+    pub fn instance(&self) -> u64 {
+        self.instance
     }
 
     pub fn source(&self) -> &Source {

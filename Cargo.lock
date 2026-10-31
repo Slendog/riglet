@@ -2640,6 +2640,7 @@ dependencies = [
  "riglet-format",
  "riglet-inochi2d",
  "riglet-render",
+ "serde",
  "serde_json",
  "thiserror 2.0.21",
  "wgpu",
