@@ -205,8 +205,23 @@ viewport. Codes are filterable. Names from files are shown as plain text.
     document dirty.
   - Saving: atomic replace, failure leaves the original, imported sources
     are never a save target, recovery write, list, restore and discard.
-  - Startup smoke test: manual (no display in CI). Checklist in the M4a
-    report.
+  - Startup smoke test: manual (no display in CI), checklist below.
+
+**Manual check (step 3 onward).**
+
+1. `cargo run -p riglet-cli -- render tests/fixtures/gray-ramp.riglet -o
+   ramp.png` and open `ramp.png` in an image viewer at 100%.
+2. `cargo run -p riglet-editor -- tests/fixtures/gray-ramp.riglet`, press
+   `1` (actual size). The 16 gray steps (0, 17, .., 255) must look like the
+   viewer's: equal steps, no washed-out darks (an extra gamma decode) or
+   crushed darks (an extra encode). The alpha row over the checkerboard
+   must fade evenly from invisible to white.
+3. Drag to pan, scroll or pinch to zoom about the cursor, `F` to fit.
+   Resize the window: the ramp stays sharp (no blur at 100%).
+4. Open Aka and Midori (`.inp`, `.inx`): loading shows a spinner and the
+   window stays responsive; Save asks for a `.riglet` and never offers the
+   imported file. Undo/redo menus stay disabled until there are edits
+   (the first edit UI comes in step 4).
 
 ## 10. Decisions (2026-10-31)
 

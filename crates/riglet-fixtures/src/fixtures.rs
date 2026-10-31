@@ -258,6 +258,38 @@ pub fn all() -> Vec<Fixture> {
     out
 }
 
+/// Manual color check for viewers (not a golden): 16 opaque gray steps
+/// 0, 17, .., 255 on top, and 16 white steps with alpha 0, 17, .., 255
+/// below, each 32 x 32 units on a 512 x 64 canvas. Every quad samples one
+/// texel center of a 16 x 2 texture, so each step is one flat value. A
+/// viewer that composites the render with a gamma error shows the steps
+/// lighter or darker than the same file rendered by `riglet render`. The
+/// committed copy is `tests/fixtures/gray-ramp.riglet`.
+pub fn gray_ramp() -> Builder {
+    let mut b = Builder::new();
+    b.model.canvas = Canvas { width: 512.0, height: 64.0 };
+    let mut rgba = Vec::with_capacity(16 * 2 * 4);
+    for i in 0..16u8 {
+        let v = i * 17;
+        rgba.extend_from_slice(&[v, v, v, 255]);
+    }
+    for i in 0..16u8 {
+        rgba.extend_from_slice(&[255, 255, 255, i * 17]);
+    }
+    b.texture("ramp", 16, 2, &rgba, false);
+    for row in 0..2u8 {
+        for i in 0..16u8 {
+            let x0 = -256.0 + 32.0 * f32::from(i);
+            let y0 = -32.0 + 32.0 * f32::from(row);
+            let positions = [[x0, y0], [x0 + 32.0, y0], [x0 + 32.0, y0 + 32.0], [x0, y0 + 32.0]];
+            let uv = [(f32::from(i) + 0.5) / 16.0, (f32::from(row) + 0.5) / 2.0];
+            let id = format!("{}{i:02}", if row == 0 { "gray" } else { "alpha" });
+            b.mesh(&id, "root", "ramp", &positions, &[uv; 4], &[0, 1, 2, 0, 2, 3]);
+        }
+    }
+    b
+}
+
 #[cfg(test)]
 mod tests {
     use riglet_format::{Limits, Rig};

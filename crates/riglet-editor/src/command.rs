@@ -96,6 +96,20 @@ impl Command {
         }
     }
 
+    /// Whether applying the command changes data uploaded to the GPU
+    /// (meshes, UVs, indices, textures, the drawable set), so the viewport
+    /// must upload the model again. None of M4a's commands do; M4b's mesh
+    /// edits will.
+    pub fn changes_gpu_data(&self) -> bool {
+        match self {
+            Command::RenameNode { .. }
+            | Command::SetNodeVisible { .. }
+            | Command::RenameParameter { .. }
+            | Command::SetParameterGroup { .. }
+            | Command::SetParameterDefault { .. } => false,
+        }
+    }
+
     /// Approximate memory a stored command holds, for the history cap:
     /// the enum plus every heap allocation it owns. Commands that carry mesh
     /// or texture data (M4b) must count those buffers here.

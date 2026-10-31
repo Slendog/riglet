@@ -421,3 +421,37 @@ fn failed_saves_leave_the_target_alone() {
     assert_eq!(names, ["blocked.riglet", "m.riglet"]);
     assert_eq!(reload(&path).model.nodes["q"].base().name, "q", "the original is unchanged");
 }
+
+/// Zooming about the cursor keeps the model point under it in place; fit
+/// shows the whole canvas, centered; bad input is ignored.
+#[test]
+fn view_zoom_pan_and_fit() {
+    use riglet_editor::{MAX_ZOOM, MIN_ZOOM, ViewState};
+    // Pixel (relative to the viewport center) of model point m.
+    let pixel = |v: &ViewState, m: [f32; 2]| [m[0] * v.zoom + v.pan[0], m[1] * v.zoom + v.pan[1]];
+    let mut v = ViewState { zoom: 2.0, pan: [10.0, -6.0], ..ViewState::default() };
+    let cursor = [40.0, 25.0];
+    let m = [(cursor[0] - v.pan[0]) / v.zoom, (cursor[1] - v.pan[1]) / v.zoom];
+    v.zoom_about(1.5, cursor);
+    assert_eq!(v.zoom, 3.0);
+    let p = pixel(&v, m);
+    assert!((p[0] - cursor[0]).abs() < 1e-4 && (p[1] - cursor[1]).abs() < 1e-4, "{p:?}");
+
+    v.zoom_about(1e9, [0.0, 0.0]);
+    assert_eq!(v.zoom, MAX_ZOOM);
+    v.zoom_about(1e-9, [0.0, 0.0]);
+    assert_eq!(v.zoom, MIN_ZOOM);
+    let before = v.clone();
+    v.zoom_about(f32::NAN, [0.0, 0.0]);
+    v.zoom_about(2.0, [f32::INFINITY, 0.0]);
+    v.pan_by([f32::NAN, 1.0]);
+    assert_eq!(v, before);
+    v.pan_by([3.0, -4.0]);
+    assert_eq!(v.pan, [before.pan[0] + 3.0, before.pan[1] - 4.0]);
+
+    v.fit((400.0, 100.0), 1000.0, 1000.0);
+    assert_eq!(v.pan, [0.0, 0.0]);
+    assert!((v.zoom - 2.375).abs() < 1e-6, "{}", v.zoom);
+    v.fit((0.0, 0.0), 1000.0, 1000.0);
+    assert!(v.zoom.is_finite());
+}

@@ -20,6 +20,9 @@ serde_json.workspace = true
 
 [dev-dependencies]
 riglet-fixtures = { path = "../riglet-fixtures" }
+# The viewport test compares the editor's render target with this binary's
+# output.
+riglet-editor = { path = "../riglet-editor" }
 
 [lints]
 workspace = true

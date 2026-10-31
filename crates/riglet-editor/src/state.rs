@@ -108,6 +108,43 @@ pub struct ViewState {
     pub selection: Option<Id>,
 }
 
+/// Smallest and largest zoom (output pixels per model unit).
+pub const MIN_ZOOM: f32 = 1.0 / 64.0;
+pub const MAX_ZOOM: f32 = 64.0;
+
+impl ViewState {
+    /// Zoom and pan that show the whole canvas centered in a viewport of
+    /// `width` x `height` pixels, with a small margin.
+    pub fn fit(&mut self, canvas: (f32, f32), width: f32, height: f32) {
+        let zoom = (width / canvas.0).min(height / canvas.1) * 0.95;
+        self.zoom = if zoom.is_finite() { zoom.clamp(MIN_ZOOM, MAX_ZOOM) } else { 1.0 };
+        self.pan = [0.0, 0.0];
+    }
+
+    /// Multiplies the zoom by `factor` (clamped to [`MIN_ZOOM`],
+    /// [`MAX_ZOOM`]), keeping the model point under `cursor` in place.
+    /// `cursor` is in viewport pixels relative to the viewport center.
+    pub fn zoom_about(&mut self, factor: f32, cursor: [f32; 2]) {
+        if !factor.is_finite() || factor <= 0.0 || !cursor.iter().all(|c| c.is_finite()) {
+            return;
+        }
+        let zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        let ratio = zoom / self.zoom;
+        // Pixel p = m * zoom + center + pan; keep m fixed at p = cursor.
+        let [px, py] = self.pan;
+        let [cx, cy] = cursor;
+        self.pan = [cx - (cx - px) * ratio, cy - (cy - py) * ratio];
+        self.zoom = zoom;
+    }
+
+    /// Moves the view by `delta` viewport pixels.
+    pub fn pan_by(&mut self, delta: [f32; 2]) {
+        if delta.iter().all(|d| d.is_finite()) {
+            self.pan = [self.pan[0] + delta[0], self.pan[1] + delta[1]];
+        }
+    }
+}
+
 impl Default for ViewState {
     fn default() -> Self {
         ViewState { zoom: 1.0, pan: [0.0, 0.0], background: None, hidden: BTreeSet::new(), selection: None }
@@ -128,7 +165,19 @@ pub struct EditorState {
     eval_stale: bool,
     import_warnings: Vec<ConversionWarning>,
     next_gesture: u64,
+    /// Identifies the GPU data (meshes, textures) of this document state;
+    /// unique across documents, so a viewport knows when to upload again.
+    gpu_generation: u64,
+    /// Bumped whenever the evaluated frame may change (rig or parameter
+    /// values), so the UI re-renders only when needed.
+    frame_version: u64,
     pub view: ViewState,
+}
+
+static GPU_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_gpu_generation() -> u64 {
+    GPU_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl EditorState {
@@ -155,6 +204,8 @@ impl EditorState {
             eval_stale: true,
             import_warnings,
             next_gesture: 0,
+            gpu_generation: next_gpu_generation(),
+            frame_version: 0,
             view: ViewState::default(),
         }
     }
@@ -181,6 +232,28 @@ impl EditorState {
 
     pub fn history(&self) -> &History {
         &self.history
+    }
+
+    /// Changes when the document's GPU data changes (see
+    /// [`Command::changes_gpu_data`]).
+    pub fn gpu_generation(&self) -> u64 {
+        self.gpu_generation
+    }
+
+    /// Changes whenever the evaluated frame may change.
+    pub fn frame_version(&self) -> u64 {
+        self.frame_version
+    }
+
+    /// Canvas size in model units.
+    pub fn canvas(&self) -> (f32, f32) {
+        (self.document.model.canvas.width, self.document.model.canvas.height)
+    }
+
+    /// The rig and its evaluation at the current parameter values.
+    pub fn frame(&mut self) -> (&Rig, &EvalOutput) {
+        self.evaluate();
+        (&self.rig, &self.eval)
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -233,6 +306,9 @@ impl EditorState {
         match Rig::prepare(&self.document, &self.limits) {
             Ok(rig) => {
                 self.replace_rig(rig);
+                if command.changes_gpu_data() {
+                    self.gpu_generation = next_gpu_generation();
+                }
                 Ok(inverse)
             }
             Err(issues) => {
@@ -253,6 +329,7 @@ impl EditorState {
         self.rig = rig;
         self.params = params;
         self.eval_stale = true;
+        self.frame_version = self.frame_version.wrapping_add(1);
     }
 
     // ---------- Parameters (view state: never dirty the document) ----------
@@ -274,6 +351,7 @@ impl EditorState {
         if *slot != clamped {
             *slot = clamped;
             self.eval_stale = true;
+            self.frame_version = self.frame_version.wrapping_add(1);
         }
         true
     }
@@ -291,6 +369,7 @@ impl EditorState {
     pub fn reset_params(&mut self) {
         self.params = ParamValues::defaults(&self.rig);
         self.eval_stale = true;
+        self.frame_version = self.frame_version.wrapping_add(1);
     }
 
     /// The model evaluated at the current parameter values (re-evaluated
