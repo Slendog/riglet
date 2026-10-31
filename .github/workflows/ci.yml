@@ -60,6 +60,21 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q mesa-vulkan-drivers libegl1 libegl-mesa0 libgl1-mesa-dri libgles2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # A rare access violation in the render tests on windows-latest (WARP)
+      # left no stack trace; see the "WARP access violation" issue. Windows
+      # Error Reporting writes a minidump of any crashing process here, and
+      # a failed job uploads it with the test binaries and their PDBs.
+      - name: Enable crash dumps (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:GITHUB_WORKSPACE "crashdumps"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $key = "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps"
+          New-Item -Force -Path $key | Out-Null
+          New-ItemProperty -Force -Path $key -Name DumpFolder -PropertyType ExpandString -Value $dir | Out-Null
+          New-ItemProperty -Force -Path $key -Name DumpType -PropertyType DWord -Value 1 | Out-Null
+          New-ItemProperty -Force -Path $key -Name DumpCount -PropertyType DWord -Value 10 | Out-Null
       - name: Tests
         shell: bash
         run: |
@@ -85,6 +100,31 @@ jobs:
           name: render-failures-${{ matrix.label }}
           path: target/tmp/render-failures/
           if-no-files-found: ignore
+      - name: Collect crash dumps (Windows)
+        id: dumps
+        if: failure() && runner.os == 'Windows'
+        shell: bash
+        run: |
+          if compgen -G "crashdumps/*.dmp" > /dev/null; then
+            # Dumps are named <exe>.<pid>.dmp: keep only those binaries.
+            for d in crashdumps/*.dmp; do
+              exe=$(basename "$d"); exe=${exe%.*.dmp}
+              cp "target/debug/deps/$exe" crashdumps/ 2>/dev/null || true
+              stem=${exe%.exe}
+              cp "target/debug/deps/$stem.pdb" "target/debug/deps/${stem//-/_}.pdb" crashdumps/ 2>/dev/null || true
+            done
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            ls -la crashdumps
+          else
+            echo "no crash dumps"
+          fi
+      - name: Upload crash dumps
+        if: failure() && steps.dumps.outputs.found == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: crash-dumps-${{ matrix.label }}
+          path: crashdumps/
+          retention-days: 14
 
   fuzz:
     name: fuzz (short run)
