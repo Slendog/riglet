@@ -575,6 +575,8 @@ impl Renderer {
 
     /// Reads a [`COLOR_FORMAT`] texture with `COPY_SRC` usage back as a
     /// straight-alpha image (R8), flattened onto `background` if given.
+    /// For the CLI and tests only: the editor shows its target as a texture
+    /// every frame and never reads it back to the CPU.
     pub fn read_target(&self, target: &wgpu::Texture, background: Option<[u8; 3]>) -> Result<Image, RenderError> {
         if target.format() != COLOR_FORMAT || !target.usage().contains(wgpu::TextureUsages::COPY_SRC) {
             return Err(RenderError::Target(format!("cannot read back a {:?} texture", target.format())));

@@ -78,10 +78,22 @@ The editor uses the renderer's code path (R1). Changes in `riglet-render`
    gives R7's mapping exactly; R7 stays the rule for exported images and
    gets a non-normative note.
 
-The viewport texture is registered with egui-wgpu and re-rendered only
-when something changed (parameter, view, model, window size). Budgets
-still apply: the viewport size is capped by `Budgets::max_output_dimension`
+The viewport texture is registered with egui-wgpu and shown directly
+every frame; it is never read back to the CPU (`read_target` is for the
+CLI and tests). It is re-rendered only when something changed (parameter,
+view, model, window size). The renderer keeps its offscreen layers and
+mask buffers for the last frame size and reuses them (every pass clears
+them first); a failed frame drops them. Budgets still apply: the viewport size is capped by `Budgets::max_output_dimension`
 and the adapter's limits; errors show in the status bar.
+
+**Color check.** egui composites the viewport texture into its UI, so a
+format or color-space mismatch there would shift every color (for example
+a double gamma conversion from an sRGB texture view). The target is
+`Rgba8Unorm` with premultiplied gamma-space values (R1), which is what
+egui's texture sampling expects; a test checks that the editor's viewport
+target holds exactly the bytes `riglet render` writes for the same model,
+parameters and size, and `tests/fixtures/gray-ramp.riglet` (a gray ramp
+next to the CLI's render of it) makes a shift visible in the manual check.
 
 Selection outlines and the mesh wireframe are drawn with egui's painter
 from `EvalOutput` positions, skipping non-finite points (E10).
@@ -98,18 +110,28 @@ not own, including another tool's `editor.json`, is kept verbatim on save
 - `EditorState` holds the loaded `Document`, its `Rig`, the source path
   and kind (`.riglet`, `.inp`, `.inx`), `ParamValues`, one reused
   `EvalOutput`, view state, warnings and the `History`.
-- Every change to the `Document` is a `Command` applied through
-  `EditorState::apply`. A command returns its inverse, and `History`
-  keeps undo and redo stacks of them. A new command clears the redo stack.
-  Consecutive commands of the same kind on the same target (typing a name)
-  coalesce into one undo step.
+- Every change to stored model data (names, defaults, ranges, later
+  meshes and keyforms) is a `Command` applied through `EditorState::apply`.
+  Parameter values set to preview a pose, and all view state, are session
+  state: no command, no undo step, never dirty. A command returns its
+  inverse, and `History` keeps undo and redo stacks of them. A new command
+  clears the redo stack.
+- **Merge rule** (`Merge` in the command API): a continuous edit (a value
+  drag from press to release, typing in one field from focus to unfocus)
+  is a `Gesture` from `EditorState::begin_gesture`. A command passed with
+  `Merge::Gesture(g)` merges into the newest step if that step came from
+  the same gesture, edits the same field, and no undo, redo or save came in
+  between; the step keeps the state before the gesture as its undo. Two
+  gestures are always two steps. `Merge::Never` is always its own step.
 - After a command the document is validated and the rig rebuilt; if that
   fails, the command is undone at once and its error shown, so an invalid
   model is never kept. (M4a's commands cannot produce one; M4b's can.)
-- History memory is capped (count and bytes); the oldest steps drop
-  first.
+- History memory is capped by approximate bytes (every command reports
+  the heap data it holds, which matters once M4b commands carry meshes or
+  textures) and by step count; the oldest steps drop first.
 - Dirty tracking compares the history position with the position at the
-  last save, so undoing back to the saved state clears the dirty marker.
+  last save: undoing back to it clears dirty, undoing or redoing away from
+  it sets dirty. Reaching equal content by another route stays dirty.
 - M4a commands: `RenameNode`, `SetNodeVisible` (the model's flag, not the
   view-only toggle), `RenameParameter`, `SetParameterGroup`,
   `SetParameterDefault` (current values become the default).
@@ -122,9 +144,11 @@ not own, including another tool's `editor.json`, is kept verbatim on save
   never freezes the window. It uses the CLI's `Limits`. A failure shows the
   error (and validation issues) and keeps the current model.
 - **Saving** is atomic: write to a temporary file in the target's
-  directory, flush and sync it, then rename it over the target (on
-  Windows a replace-rename). A failed save leaves the original untouched
-  and removes the temporary file.
+  directory (so the rename never crosses file systems), sync it, rename it
+  over the target (replacing it, Windows included), then sync the
+  directory on Unix. A failed save leaves the original untouched and
+  removes the temporary file. Temporary files left by a crash are never
+  read; each save removes its target's leftovers older than 10 minutes.
 - **Imported files are never overwritten without asking.** A model opened
   from `.inp`/`.inx` has no save path: Save acts as Save As and proposes a
   `.riglet` next to it. Export to Inochi2D asks before replacing an
@@ -202,10 +226,13 @@ viewport. Codes are filterable. Names from files are shown as plain text.
 2. `riglet-editor` library: `EditorState`, commands, history, dirty
    tracking, atomic save, preservation tests. **Review stop** (both need
    no UI dependency; eframe and rfd come in 3).
-3. Editor binary: window, open `.riglet` (background load), viewport with
-   pan, zoom and fit.
+3. Editor binary (`eframe`, `rfd`): window, open `.riglet` (background
+   load, native dialog), viewport with pan, zoom and fit, the color check
+   (viewport target equals `riglet render`, gray-ramp fixture). Renderer
+   target reuse landed before this step.
 4. Parameter panel; node tree, selection outline, hide-in-view.
 5. Inochi2D open and export, the warnings panel, E10 live entries.
-6. Autosave and recovery; unsaved-changes prompts; `rfd` dialogs.
+6. Autosave and crash recovery (not in the editor core commit),
+   unsaved-changes prompts, save dialogs.
 
 **Review stop** at the end of M4a, with the manual checklist.
