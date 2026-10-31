@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use riglet_format::model::{ConversionWarning, Id};
 use riglet_format::{Document, EvalOutput, Issue, Limits, PackageError, ParamValues, Rig};
 
-use crate::command::{Command, CommandError};
+use crate::command::{Command, CommandError, Gesture, Merge};
 use crate::history::{History, HistoryLimits};
 use crate::save::write_atomic;
 
@@ -127,6 +127,7 @@ pub struct EditorState {
     eval: EvalOutput,
     eval_stale: bool,
     import_warnings: Vec<ConversionWarning>,
+    next_gesture: u64,
     pub view: ViewState,
 }
 
@@ -153,6 +154,7 @@ impl EditorState {
             eval: EvalOutput::new(),
             eval_stale: true,
             import_warnings,
+            next_gesture: 0,
             view: ViewState::default(),
         }
     }
@@ -187,18 +189,21 @@ impl EditorState {
 
     // ---------- Commands ----------
 
-    /// Applies `command` as one undo step (merged into the previous step
-    /// when `coalesce` is set and it edits the same field, see
-    /// [`History::seal`]). The model is validated afterwards; a command
-    /// that would make it invalid is reverted and returns an error.
-    pub fn apply(&mut self, command: Command, coalesce: bool) -> Result<(), CommandError> {
+    /// Applies `command` and records it in the history, merged into the
+    /// previous step by the rule on [`Merge`]. The model is validated
+    /// afterwards; a command that would make it invalid is reverted and
+    /// returns an error. Only stored model data changes through commands;
+    /// parameter values for previewing a pose and the view state do not.
+    pub fn apply(&mut self, command: Command, merge: Merge) -> Result<(), CommandError> {
         let inverse = self.apply_checked(&command)?;
-        self.history.push(command, inverse, coalesce);
+        self.history.push(command, inverse, merge);
         Ok(())
     }
 
-    pub fn seal(&mut self) {
-        self.history.seal();
+    /// Starts a continuous edit (see [`Merge`]).
+    pub fn begin_gesture(&mut self) -> Gesture {
+        self.next_gesture = self.next_gesture.wrapping_add(1);
+        Gesture(self.next_gesture)
     }
 
     /// Undoes the last step. `Ok(false)` when there is nothing to undo.

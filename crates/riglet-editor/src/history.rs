@@ -1,7 +1,7 @@
 //! Undo and redo stacks of applied commands, with coalescing, a memory cap
 //! and the saved-state marker behind dirty tracking.
 
-use crate::command::Command;
+use crate::command::{Command, Merge};
 
 /// Caps for the undo history; the oldest steps are dropped first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +25,8 @@ pub(crate) struct Step {
     pub(crate) id: u64,
     pub(crate) redo: Command,
     pub(crate) undo: Command,
+    /// The gesture that made this step, if any (see [`Merge`]).
+    pub(crate) gesture: Option<u64>,
 }
 
 impl Step {
@@ -45,7 +47,8 @@ pub struct History {
     /// Id of the state at the last save (`None`: never saved, for example
     /// an import that has no `.riglet` yet).
     saved: Option<u64>,
-    /// Whether the next coalescable command may merge into the top step.
+    /// Whether a command of the top step's gesture may still merge into it
+    /// (false after an undo, a redo or a save).
     open: bool,
     bytes: usize,
 }
@@ -98,35 +101,34 @@ impl History {
         self.undo.len()
     }
 
-    /// Ends coalescing: the next command starts a new step even if it edits
-    /// the same field (the UI calls this when a text field loses focus).
-    pub fn seal(&mut self) {
-        self.open = false;
-    }
-
-    /// Records an applied command. With `coalesce`, a command editing the
-    /// same field as the top step (and no seal in between) merges into it:
-    /// one undo returns to the state before the first of them.
-    pub(crate) fn push(&mut self, redo: Command, undo: Command, coalesce: bool) {
+    /// Records an applied command; merges it into the top step by the rule
+    /// on [`Merge`].
+    pub(crate) fn push(&mut self, redo: Command, undo: Command, merge: Merge) {
         for s in self.redo.drain(..) {
             self.bytes = self.bytes.saturating_sub(s.bytes());
         }
-        let merge = coalesce && self.open && self.undo.last().is_some_and(|top| top.redo.target() == redo.target());
+        let gesture = match merge {
+            Merge::Never => None,
+            Merge::Gesture(g) => Some(g.0),
+        };
+        let merges = gesture.is_some()
+            && self.open
+            && self.undo.last().is_some_and(|top| top.gesture == gesture && top.redo.target() == redo.target());
         let id = self.fresh_id();
         match self.undo.last_mut() {
-            Some(top) if merge => {
+            Some(top) if merges => {
                 let before = top.bytes();
                 top.redo = redo;
                 top.id = id;
                 self.bytes = self.bytes.saturating_sub(before).saturating_add(top.bytes());
             }
             _ => {
-                let step = Step { id, redo, undo };
+                let step = Step { id, redo, undo, gesture };
                 self.bytes = self.bytes.saturating_add(step.bytes());
                 self.undo.push(step);
             }
         }
-        self.open = coalesce;
+        self.open = true;
         while self.undo.len() > self.limits.max_steps.max(1) || self.bytes > self.limits.max_bytes {
             if self.undo.len() <= 1 {
                 break;
@@ -135,6 +137,11 @@ impl History {
             self.bytes = self.bytes.saturating_sub(dropped.bytes());
             self.base = dropped.id;
         }
+    }
+
+    /// Approximate memory the history holds (see [`Command`]'s size).
+    pub fn bytes(&self) -> usize {
+        self.bytes
     }
 
     /// The step to undo, moved to the redo stack. The caller applies its

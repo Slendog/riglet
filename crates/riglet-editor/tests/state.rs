@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use riglet_editor::{
-    Command, CommandError, EditorState, HistoryLimits, LoadError, MAX_NAME_BYTES, SaveError, SourceKind, load,
+    Command, CommandError, EditorState, HistoryLimits, LoadError, MAX_NAME_BYTES, Merge, SaveError, SourceKind, load,
 };
 use riglet_fixtures::{Builder, linear};
 use riglet_format::{Document, Limits};
@@ -55,7 +55,7 @@ fn a_riglet_opens_clean_and_saves_what_changed() {
     assert_eq!(s.save_path(), Some(path.as_path()));
     assert!(!s.is_dirty());
 
-    s.apply(rename("q", "Face"), false).unwrap();
+    s.apply(rename("q", "Face"), Merge::Never).unwrap();
     assert!(s.is_dirty());
     s.save().unwrap();
     assert!(!s.is_dirty());
@@ -79,7 +79,7 @@ fn unknown_entries_and_editor_json_are_preserved() {
     let mut s = open(&path);
     s.view.zoom = 4.0;
     s.view.hidden.insert("q".into());
-    s.apply(Command::SetNodeVisible { node: "q".into(), visible: false }, false).unwrap();
+    s.apply(Command::SetNodeVisible { node: "q".into(), visible: false }, Merge::Never).unwrap();
     let out = dir.join("copy.riglet");
     s.save_as(&out).unwrap();
     let saved = reload(&out);
@@ -98,12 +98,12 @@ fn undo_and_redo_restore_each_state() {
     let path = write(&dir, "m.riglet", &model().document());
     let mut s = open(&path);
     let original = s.document().clone();
-    s.apply(rename("q", "A"), false).unwrap();
+    s.apply(rename("q", "A"), Merge::Never).unwrap();
     let after_rename = s.document().clone();
-    s.apply(Command::SetNodeVisible { node: "q".into(), visible: false }, false).unwrap();
-    s.apply(Command::RenameParameter { parameter: "p".into(), name: "Smile".into() }, false).unwrap();
-    s.apply(Command::SetParameterGroup { parameter: "p".into(), group: Some("Mouth".into()) }, false).unwrap();
-    s.apply(Command::SetParameterDefault { parameter: "xy".into(), default: vec![0.5, -0.25] }, false).unwrap();
+    s.apply(Command::SetNodeVisible { node: "q".into(), visible: false }, Merge::Never).unwrap();
+    s.apply(Command::RenameParameter { parameter: "p".into(), name: "Smile".into() }, Merge::Never).unwrap();
+    s.apply(Command::SetParameterGroup { parameter: "p".into(), group: Some("Mouth".into()) }, Merge::Never).unwrap();
+    s.apply(Command::SetParameterDefault { parameter: "xy".into(), default: vec![0.5, -0.25] }, Merge::Never).unwrap();
     let last = s.document().clone();
     assert_eq!(s.document().model.parameters[1].default, [0.5, -0.25]);
     assert_eq!(s.rig().params[1].default, [0.5, -0.25], "the rig is rebuilt after a command");
@@ -125,49 +125,107 @@ fn undo_and_redo_restore_each_state() {
 
     // A new command after an undo drops the redo stack.
     assert!(s.undo().unwrap());
-    s.apply(rename("q", "B"), false).unwrap();
+    s.apply(rename("q", "B"), Merge::Never).unwrap();
     assert!(!s.history().can_redo());
 }
 
+/// One gesture (a drag, typing in one field) is one undo step; two
+/// gestures on the same field are two.
 #[test]
-fn edits_of_one_field_coalesce_until_sealed() {
-    let dir = temp_dir("coalesce");
+fn a_gesture_is_one_undo_step() {
+    let dir = temp_dir("gesture");
     let path = write(&dir, "m.riglet", &model().document());
     let mut s = open(&path);
-    for name in ["F", "Fa", "Fac", "Face"] {
-        s.apply(rename("q", name), true).unwrap();
+    let default = |v: f32| Command::SetParameterDefault { parameter: "p".into(), default: vec![v] };
+
+    // Drag 1 of the default: many commands, one step.
+    let drag = s.begin_gesture();
+    for v in [0.1, 0.2, 0.3, 0.4] {
+        s.apply(default(v), Merge::Gesture(drag)).unwrap();
     }
     assert_eq!(s.history().undo_len(), 1);
-    // A different field starts a new step; so does the same field after a
-    // seal.
-    s.apply(Command::RenameParameter { parameter: "p".into(), name: "P".into() }, true).unwrap();
-    s.seal();
-    s.apply(Command::RenameParameter { parameter: "p".into(), name: "P2".into() }, true).unwrap();
+    // Drag 2 of the same field: a new step.
+    let drag = s.begin_gesture();
+    for v in [0.5, 0.6] {
+        s.apply(default(v), Merge::Gesture(drag)).unwrap();
+    }
+    assert_eq!(s.history().undo_len(), 2);
+    // Typing a name is a gesture too.
+    let typing = s.begin_gesture();
+    for name in ["F", "Fa", "Fac", "Face"] {
+        s.apply(rename("q", name), Merge::Gesture(typing)).unwrap();
+    }
     assert_eq!(s.history().undo_len(), 3);
 
     s.undo().unwrap();
-    s.undo().unwrap();
-    assert_eq!(s.document().model.nodes["q"].base().name, "Face");
-    s.undo().unwrap();
     assert_eq!(s.document().model.nodes["q"].base().name, "q");
+    s.undo().unwrap();
+    assert_eq!(s.document().model.parameters[0].default, [0.4]);
+    s.undo().unwrap();
+    assert_eq!(s.document().model.parameters[0].default, [0.0]);
     assert!(!s.is_dirty());
 }
 
-/// Coalescing into the step that was saved makes the document dirty again.
+/// Within one gesture, a command on another field, an undo or a save ends
+/// the step: later commands of the gesture start a new one.
 #[test]
-fn coalescing_after_a_save_is_dirty() {
-    let dir = temp_dir("coalesce_save");
+fn a_gesture_step_ends_on_other_fields_undo_and_save() {
+    let dir = temp_dir("gesture_breaks");
     let path = write(&dir, "m.riglet", &model().document());
     let mut s = open(&path);
-    s.apply(rename("q", "F"), true).unwrap();
+    let g = s.begin_gesture();
+    s.apply(rename("q", "a"), Merge::Gesture(g)).unwrap();
+    s.apply(Command::RenameParameter { parameter: "p".into(), name: "P".into() }, Merge::Gesture(g)).unwrap();
+    s.apply(rename("q", "ab"), Merge::Gesture(g)).unwrap();
+    assert_eq!(s.history().undo_len(), 3);
+    // Never-merging commands stay separate.
+    s.apply(rename("q", "x"), Merge::Never).unwrap();
+    s.apply(rename("q", "y"), Merge::Never).unwrap();
+    assert_eq!(s.history().undo_len(), 5);
+
+    let g = s.begin_gesture();
+    s.apply(rename("q", "1"), Merge::Gesture(g)).unwrap();
+    s.undo().unwrap();
+    s.apply(rename("q", "2"), Merge::Gesture(g)).unwrap();
+    assert_eq!(s.history().undo_len(), 6, "after an undo the gesture starts a new step");
+
+    s.apply(rename("q", "3"), Merge::Gesture(g)).unwrap();
+    assert_eq!(s.history().undo_len(), 6);
     s.save().unwrap();
-    assert!(!s.is_dirty());
-    // Saving seals: this is a new step.
-    s.apply(rename("q", "Fa"), true).unwrap();
+    s.apply(rename("q", "4"), Merge::Gesture(g)).unwrap();
+    assert_eq!(s.history().undo_len(), 7, "a save ends the step");
     assert!(s.is_dirty());
-    assert_eq!(s.history().undo_len(), 2);
     s.undo().unwrap();
     assert!(!s.is_dirty());
+}
+
+/// Dirty is "the history position differs from the one at the last save":
+/// undoing back to it clears dirty, moving away by undo or redo sets it.
+#[test]
+fn dirty_follows_the_saved_position() {
+    let dir = temp_dir("dirty");
+    let path = write(&dir, "m.riglet", &model().document());
+    let mut s = open(&path);
+    s.apply(rename("q", "a"), Merge::Never).unwrap();
+    s.apply(rename("q", "b"), Merge::Never).unwrap();
+    s.save().unwrap();
+    assert!(!s.is_dirty());
+    s.undo().unwrap();
+    assert!(s.is_dirty(), "undo past the save");
+    s.redo().unwrap();
+    assert!(!s.is_dirty(), "redo back to the save");
+    s.apply(rename("q", "c"), Merge::Never).unwrap();
+    assert!(s.is_dirty());
+    s.undo().unwrap();
+    assert!(!s.is_dirty(), "undo back to the save");
+    s.redo().unwrap();
+    assert!(s.is_dirty(), "redo past the save");
+    // Same content by another route is still dirty: it is a different
+    // history position (content comparison would be wrong for M4b edits).
+    s.undo().unwrap();
+    s.undo().unwrap();
+    s.apply(rename("q", "b"), Merge::Never).unwrap();
+    assert!(s.is_dirty());
 }
 
 #[test]
@@ -177,7 +235,7 @@ fn the_history_cap_drops_the_oldest_steps() {
     let limits = HistoryLimits { max_steps: 3, max_bytes: usize::MAX };
     let mut s = EditorState::open_with(load(&path, &Limits::default()).unwrap(), Limits::default(), limits);
     for i in 0..5 {
-        s.apply(rename("q", &format!("n{i}")), false).unwrap();
+        s.apply(rename("q", &format!("n{i}")), Merge::Never).unwrap();
     }
     assert_eq!(s.history().undo_len(), 3);
     while s.undo().unwrap() {}
@@ -188,9 +246,11 @@ fn the_history_cap_drops_the_oldest_steps() {
     let limits = HistoryLimits { max_steps: 1000, max_bytes: 4 * MAX_NAME_BYTES };
     let mut s = EditorState::open_with(load(&path, &Limits::default()).unwrap(), Limits::default(), limits);
     for i in 0..10 {
-        s.apply(rename("q", &format!("{i}").repeat(MAX_NAME_BYTES)), false).unwrap();
+        s.apply(rename("q", &format!("{i}").repeat(MAX_NAME_BYTES)), Merge::Never).unwrap();
     }
     assert!(s.history().undo_len() < 4, "{}", s.history().undo_len());
+    assert!(s.history().bytes() <= 4 * MAX_NAME_BYTES, "{}", s.history().bytes());
+    assert!(s.history().bytes() > 0);
 }
 
 #[test]
@@ -224,7 +284,7 @@ fn bad_commands_change_nothing() {
         ),
     ];
     for (command, want) in cases {
-        assert_eq!(s.apply(command.clone(), false), Err(want), "{command:?}");
+        assert_eq!(s.apply(command.clone(), Merge::Never), Err(want), "{command:?}");
     }
     assert_eq!(s.document(), &before);
     assert_eq!(s.history().undo_len(), 0);
@@ -250,11 +310,16 @@ fn parameters_and_view_state_never_dirty_the_document() {
     s.view.selection = Some("q".into());
     s.view.hidden.insert("q".into());
     s.view.background = Some([0, 0, 0]);
+    s.reset_params();
+    assert!(s.set_param("p", [1.0, 0.0]));
+    assert!(s.set_param("xy", [0.25, -0.5]));
     assert!(!s.is_dirty());
-    assert_eq!(s.history().undo_len(), 0);
+    assert_eq!(s.history().undo_len(), 0, "previewing a pose creates no undo steps");
+    assert!(!s.undo().unwrap());
+    assert_eq!(s.param_values().values[0], [1.0, 0.0], "undo doesn't touch preview values");
 
     // Values survive a command (the rig is rebuilt, ids unchanged).
-    s.apply(Command::RenameParameter { parameter: "p".into(), name: "Smile".into() }, false).unwrap();
+    s.apply(Command::RenameParameter { parameter: "p".into(), name: "Smile".into() }, Merge::Never).unwrap();
     assert_eq!(s.param_values().values, [[1.0, 0.0], [0.25, -0.5]]);
     assert!(s.reset_param("p"));
     assert_eq!(s.param_values().values[0], [0.0, 0.0]);
@@ -263,7 +328,7 @@ fn parameters_and_view_state_never_dirty_the_document() {
     assert_eq!(s.evaluate().drawables[0].positions[0][0], x0);
 
     // The model's visibility flag is an edit and reaches evaluation.
-    s.apply(Command::SetNodeVisible { node: "q".into(), visible: false }, false).unwrap();
+    s.apply(Command::SetNodeVisible { node: "q".into(), visible: false }, Merge::Never).unwrap();
     assert!(!s.evaluate().drawables[0].visible);
 }
 
@@ -338,7 +403,7 @@ fn failed_saves_leave_the_target_alone() {
     let dir = temp_dir("failed_save");
     let path = write(&dir, "m.riglet", &model().document());
     let mut s = open(&path);
-    s.apply(rename("q", "changed"), false).unwrap();
+    s.apply(rename("q", "changed"), Merge::Never).unwrap();
 
     // The target is a directory: the rename fails.
     let blocked = dir.join("blocked.riglet");

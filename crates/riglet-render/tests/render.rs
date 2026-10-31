@@ -553,3 +553,47 @@ fn from_device_renders_on_a_callers_device() {
         mapped_at_creation: false,
     });
 }
+
+/// Offscreen layers and mask buffers are allocated once per frame size and
+/// reused; reuse never carries pixels from one frame or model into the
+/// next.
+#[test]
+fn offscreen_targets_are_reused_without_carry_over() {
+    let Some(r) = renderer() else { return };
+    let all = fixtures::all();
+    // Fixtures with composites and masks, the users of the reused targets.
+    let pick: Vec<_> = all
+        .iter()
+        .filter(|f| {
+            let doc = f.builder.document();
+            let rig = Rig::prepare(&doc, &Limits::default()).unwrap();
+            let gpu = r.upload(&doc, &rig).unwrap();
+            gpu.composite_depth() > 0 || gpu.has_masks()
+        })
+        .collect();
+    assert!(pick.len() >= 3, "need fixtures with composites and masks");
+    let first: Vec<Image> = pick.iter().map(|f| render_fixture(&r, f)).collect();
+    // Again in reverse order, so each fixture follows a different one.
+    for (f, want) in pick.iter().zip(&first).rev() {
+        assert_eq!(&render_fixture(&r, f), want, "{}: differs after reusing targets", f.name);
+    }
+
+    // Same size, depth and masks: one allocation for many frames.
+    let f = pick[0];
+    let doc = f.builder.document();
+    let rig = Rig::prepare(&doc, &Limits::default()).unwrap();
+    let model = r.upload(&doc, &rig).unwrap();
+    let mut out = EvalOutput::new();
+    rig.evaluate(&ParamValues::defaults(&rig), &mut out);
+    let canvas = (doc.model.canvas.width, doc.model.canvas.height);
+    let half = FrameOptions { scale: 0.5, ..Default::default() };
+    r.render(&model, &rig, canvas, &out, &half).unwrap();
+    let before = r.scratch_allocations();
+    for _ in 0..5 {
+        r.render(&model, &rig, canvas, &out, &FrameOptions::default()).unwrap();
+    }
+    assert_eq!(r.scratch_allocations() - before, 1);
+    // Another size allocates again.
+    r.render(&model, &rig, canvas, &out, &half).unwrap();
+    assert_eq!(r.scratch_allocations() - before, 2);
+}

@@ -49,6 +49,31 @@ pub enum CommandError {
     Invalid(String),
 }
 
+/// One continuous edit by the user: a slider or value drag, from press to
+/// release, or typing in one text field, from focus to unfocus. Get one
+/// from [`crate::EditorState::begin_gesture`] when the edit starts and pass
+/// it with every command of that edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gesture(pub(crate) u64);
+
+/// How an applied command joins the undo history.
+///
+/// Merge rule: a command with `Merge::Gesture(g)` merges into the newest
+/// undo step when that step was made in the same gesture `g`, edits the
+/// same field (same command kind and target), and nothing ended the
+/// gesture's step in between (an undo, a redo or a save). The merged step
+/// keeps the state before the gesture's first command as its undo, and the
+/// last command as its redo, so one undo reverts the whole drag. Anything
+/// else starts a new step. Commands of different gestures never merge,
+/// even on the same field, so two drags of one slider are two steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Merge {
+    /// A step of its own (menu actions, toggles).
+    Never,
+    /// Part of a continuous edit.
+    Gesture(Gesture),
+}
+
 /// What a command changes, for coalescing consecutive edits of the same
 /// field into one undo step.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,7 +96,9 @@ impl Command {
         }
     }
 
-    /// Approximate memory a stored command holds, for the history cap.
+    /// Approximate memory a stored command holds, for the history cap:
+    /// the enum plus every heap allocation it owns. Commands that carry mesh
+    /// or texture data (M4b) must count those buffers here.
     pub(crate) fn bytes(&self) -> usize {
         let text = match self {
             Command::RenameNode { node, name } => node.len() + name.len(),

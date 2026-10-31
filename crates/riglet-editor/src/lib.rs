@@ -7,7 +7,7 @@ pub mod history;
 pub mod save;
 pub mod state;
 
-pub use command::{Command, CommandError, MAX_NAME_BYTES};
+pub use command::{Command, CommandError, Gesture, MAX_NAME_BYTES, Merge};
 pub use history::{History, HistoryLimits};
 pub use save::write_atomic;
 pub use state::{EditorState, LoadError, Loaded, SaveError, Source, SourceKind, ViewState, load};

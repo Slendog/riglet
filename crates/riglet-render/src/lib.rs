@@ -159,6 +159,30 @@ pub struct Renderer {
     budgets: Budgets,
     pipelines: Pipelines,
     draw_stride: u64,
+    /// Offscreen targets of the last frame size, reused by the next frame.
+    scratch: std::sync::Mutex<Option<Scratch>>,
+    scratch_allocations: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScratchKey {
+    width: u32,
+    height: u32,
+    depth: usize,
+    has_masks: bool,
+}
+
+/// One layer per composite depth, the clip and invert mask buffers, and
+/// 1x1 dummies bound in their place while rendering into them.
+struct Scratch {
+    key: ScratchKey,
+    _textures: Vec<wgpu::Texture>,
+    layer_views: Vec<wgpu::TextureView>,
+    layer_groups: Vec<wgpu::BindGroup>,
+    clip_view: wgpu::TextureView,
+    invert_view: wgpu::TextureView,
+    mask_group: wgpu::BindGroup,
+    dummy_group: wgpu::BindGroup,
 }
 
 fn blend_index(mode: BlendMode) -> usize {
@@ -241,7 +265,16 @@ impl Renderer {
         // Draw struct up to the next multiple.
         let align = u64::from(device_limits.min_uniform_buffer_offset_alignment).max(1);
         let stride = DRAW_UNIFORM_BYTES.div_ceil(align) * align;
-        Renderer { device, queue, summary, budgets, pipelines, draw_stride: stride }
+        Renderer {
+            device,
+            queue,
+            summary,
+            budgets,
+            pipelines,
+            draw_stride: stride,
+            scratch: std::sync::Mutex::new(None),
+            scratch_allocations: std::sync::atomic::AtomicU64::new(0),
+        }
     }
 
     async fn new_async(options: RendererOptions) -> Result<Self, RenderError> {
@@ -530,7 +563,14 @@ impl Renderer {
         let pan = options.view.map_or([0.0, 0.0], |v| v.pan);
         let origin = [width as f32 * 0.5 + pan[0], height as f32 * 0.5 + pan[1]];
         let output = target.create_view(&wgpu::TextureViewDescriptor::default());
-        self.scoped(|| self.render_inner(model, rig, frame, options.scale, origin, &output, width, height))
+        let result =
+            self.scoped(|| self.render_inner(model, rig, frame, options.scale, origin, &output, width, height));
+        if result.is_err() {
+            // Never reuse targets from a frame that failed (they may be the
+            // allocation that ran out of memory).
+            *self.scratch.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+        result
     }
 
     /// Reads a [`COLOR_FORMAT`] texture with `COPY_SRC` usage back as a
@@ -540,6 +580,77 @@ impl Renderer {
             return Err(RenderError::Target(format!("cannot read back a {:?} texture", target.format())));
         }
         self.scoped(|| self.read_inner(target, background))
+    }
+
+    /// Allocates the offscreen layers and mask buffers for one frame size.
+    fn create_scratch(&self, key: ScratchKey) -> Scratch {
+        let color = |label: &str, extra: wgpu::TextureUsages| {
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: key.width, height: key.height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: COLOR_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | extra,
+                view_formats: &[],
+            })
+        };
+        let layers: Vec<wgpu::Texture> =
+            (0..key.depth).map(|_| color("riglet layer", wgpu::TextureUsages::TEXTURE_BINDING)).collect();
+        let mask_size = if key.has_masks { (key.width, key.height) } else { (1, 1) };
+        let mask_texture = |label: &str, size: (u32, u32)| {
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: MASK_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+        };
+        let clip = mask_texture("riglet clip mask", mask_size);
+        let invert = mask_texture("riglet invert mask", mask_size);
+        // Mask passes render INTO the mask buffers, so they bind 1x1
+        // dummies in their place (a texture can't be read and written in
+        // one pass).
+        let dummy_a = mask_texture("riglet dummy mask", (1, 1));
+        let dummy_b = mask_texture("riglet dummy mask", (1, 1));
+        let view = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
+        let (clip_view, invert_view) = (view(&clip), view(&invert));
+        let mask_group_for = |a: &wgpu::TextureView, b: &wgpu::TextureView| {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("riglet masks"),
+                layout: &self.pipelines.mask_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(a) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(b) },
+                ],
+            })
+        };
+        let mask_group = mask_group_for(&clip_view, &invert_view);
+        let dummy_group = mask_group_for(&view(&dummy_a), &view(&dummy_b));
+        let layer_views: Vec<wgpu::TextureView> = layers.iter().map(view).collect();
+        let layer_groups: Vec<wgpu::BindGroup> = layer_views.iter().map(|v| self.bind_texture(v)).collect();
+
+        Scratch {
+            key,
+            _textures: [vec![clip, invert, dummy_a, dummy_b], layers].concat(),
+            layer_views,
+            layer_groups,
+            clip_view,
+            invert_view,
+            mask_group,
+            dummy_group,
+        }
+    }
+
+    /// How many times offscreen targets were allocated (tests check reuse).
+    #[doc(hidden)]
+    pub fn scratch_allocations(&self) -> u64 {
+        self.scratch_allocations.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn check_frame(&self, model: &GpuModel, frame: &EvalOutput, width: u32, height: u32) -> Result<(), RenderError> {
@@ -675,57 +786,18 @@ impl Renderer {
             .collect();
         self.queue.write_buffer(&model.frame_buffer, 0, &frame_uniform);
 
-        // Targets: output, one layer per depth, two mask buffers.
-        let color = |label: &str, extra: wgpu::TextureUsages| {
-            self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(label),
-                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: COLOR_FORMAT,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | extra,
-                view_formats: &[],
-            })
-        };
-        let layers: Vec<wgpu::Texture> =
-            (0..model.depth).map(|_| color("riglet layer", wgpu::TextureUsages::TEXTURE_BINDING)).collect();
-        let mask_size = if model.has_masks { (width, height) } else { (1, 1) };
-        let mask_texture = |label: &str, size: (u32, u32)| {
-            self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(label),
-                size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: MASK_FORMAT,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            })
-        };
-        let clip = mask_texture("riglet clip mask", mask_size);
-        let invert = mask_texture("riglet invert mask", mask_size);
-        // Mask passes render INTO the mask buffers, so they bind 1x1
-        // dummies in their place (a texture can't be read and written in
-        // one pass).
-        let dummy_a = mask_texture("riglet dummy mask", (1, 1));
-        let dummy_b = mask_texture("riglet dummy mask", (1, 1));
-        let view = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
-        let (clip_view, invert_view) = (view(&clip), view(&invert));
-        let mask_group_for = |a: &wgpu::TextureView, b: &wgpu::TextureView| {
-            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("riglet masks"),
-                layout: &self.pipelines.mask_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(a) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(b) },
-                ],
-            })
-        };
-        let mask_group = mask_group_for(&clip_view, &invert_view);
-        let dummy_group = mask_group_for(&view(&dummy_a), &view(&dummy_b));
-        let layer_views: Vec<wgpu::TextureView> = layers.iter().map(view).collect();
-        let layer_groups: Vec<wgpu::BindGroup> = layer_views.iter().map(|v| self.bind_texture(v)).collect();
+        // Offscreen layers and mask buffers, reused while the size, depth
+        // and mask use stay the same (every pass that uses them clears them
+        // first, so nothing carries over between frames).
+        let key = ScratchKey { width, height, depth: model.depth, has_masks: model.has_masks };
+        let mut cache = self.scratch.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cache.as_ref().is_none_or(|c| c.key != key) {
+            *cache = None;
+            *cache = Some(self.create_scratch(key));
+            self.scratch_allocations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let Some(scratch) = cache.as_ref() else { return Err(RenderError::Gpu("no offscreen targets".into())) };
+        let Scratch { layer_views, layer_groups, clip_view, invert_view, mask_group, dummy_group, .. } = scratch;
 
         let mut encoder =
             self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("riglet frame") });
@@ -734,12 +806,12 @@ impl Renderer {
             model,
             rig,
             frame,
-            layer_views: &layer_views,
-            layer_groups: &layer_groups,
-            clip_view: &clip_view,
-            invert_view: &invert_view,
-            mask_group: &mask_group,
-            dummy_group: &dummy_group,
+            layer_views,
+            layer_groups,
+            clip_view,
+            invert_view,
+            mask_group,
+            dummy_group,
         };
         ctx.render_scope(&mut encoder, output, &frame.members, 0);
         self.queue.submit([encoder.finish()]);
