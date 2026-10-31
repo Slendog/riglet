@@ -4,8 +4,8 @@
 use serde_json::Value;
 
 pub const FORMAT_NAME: &str = "riglet";
-pub const CURRENT_SCHEMA_VERSION: &str = "0.4.0";
-const CURRENT: Version = Version { major: 0, minor: 4, patch: 0 };
+pub const CURRENT_SCHEMA_VERSION: &str = "0.4.1";
+const CURRENT: Version = Version { major: 0, minor: 4, patch: 1 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MigrateError {
@@ -158,6 +158,17 @@ mod tests {
         let mut manifest = json!({"format": "riglet", "schemaVersion": "0.2.0"});
         assert_eq!(migrate(&mut manifest, &mut json!({})), Ok("0.2.0".to_owned()));
         assert_eq!(manifest["schemaVersion"], CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn v0_4_0_reads_as_the_current_patch() {
+        // 0.4.1 only clarified evaluation (E10): nothing to migrate.
+        let mut manifest = json!({"format": "riglet", "schemaVersion": "0.4.0"});
+        let mut model = json!({"nodes": {}});
+        let before = model.clone();
+        assert_eq!(migrate(&mut manifest, &mut model), Ok("0.4.0".to_owned()));
+        assert_eq!(manifest["schemaVersion"], "0.4.1");
+        assert_eq!(model, before);
     }
 
     #[test]

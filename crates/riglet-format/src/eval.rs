@@ -58,6 +58,39 @@ pub struct DrawableFrame {
     pub screen_color: Rgb,
     /// False when the node or any ancestor is hidden (model visibility).
     pub visible: bool,
+    /// Positions that evaluated to NaN or infinity (E10). Renderers skip
+    /// every triangle that uses one; 0 for almost every model.
+    pub non_finite_vertices: usize,
+}
+
+/// E10: what evaluated to NaN or infinity this frame. Huge but finite
+/// keyform values can overflow when sets add or deformers map them.
+/// Everything else in the output is finite.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NonFinite {
+    /// Drawable positions that are not finite (left as evaluated, flagged
+    /// per drawable in [`DrawableFrame::non_finite_vertices`]).
+    pub vertices: usize,
+    /// Node index ([`Rig::nodes`]) of the first drawable, in slot order,
+    /// with a non-finite position.
+    pub first_vertex_node: Option<usize>,
+    /// Drawables and composites whose opacity or colors were not finite
+    /// (drawn as invisible: opacity 0, colors 0), plus non-finite draw
+    /// orders (sorted as 0).
+    pub values: usize,
+    /// Node index of the first of those, in slot order (drawables first).
+    pub first_value_node: Option<usize>,
+}
+
+impl NonFinite {
+    pub fn is_empty(&self) -> bool {
+        self.vertices == 0 && self.values == 0
+    }
+
+    fn value(&mut self, node: usize) {
+        self.values += 1;
+        self.first_value_node.get_or_insert(node);
+    }
 }
 
 /// A member of a draw scope (the root or a composite, E4).
@@ -95,6 +128,8 @@ pub struct EvalOutput {
     pub composites: Vec<CompositeFrame>,
     /// The top scope (everything outside composites), bottom first.
     pub members: Vec<Member>,
+    /// Non-finite results this frame (E10); empty for almost every model.
+    pub non_finite: NonFinite,
     scratch: Scratch,
 }
 
@@ -123,6 +158,28 @@ impl EvalOutput {
             }
         }
         out
+    }
+
+    /// E10 invariant, for tests and fuzzing: every value is finite except
+    /// flagged drawable positions, and the flags add up to the report.
+    pub fn finite_or_flagged(&self) -> bool {
+        let finite = |v: &[f32]| v.iter().all(|x| x.is_finite());
+        let mut vertices = 0usize;
+        for d in &self.drawables {
+            let bad = d.positions.iter().filter(|p| !finite(&p[..])).count();
+            if bad != d.non_finite_vertices
+                || !finite(&[d.opacity, d.draw_order])
+                || !finite(&d.multiply_color)
+                || !finite(&d.screen_color)
+            {
+                return false;
+            }
+            vertices += bad;
+        }
+        let composites = self.composites.iter().all(|c| finite(&[c.opacity, c.draw_order]));
+        composites
+            && vertices == self.non_finite.vertices
+            && (vertices == 0) == self.non_finite.first_vertex_node.is_none()
     }
 
     /// The evaluated drawable for node `node`, if it is a drawable.
@@ -810,6 +867,40 @@ impl Rig {
             frame.visible = visible.get(node).copied().unwrap_or(false);
             frame.members.clear();
         }
+
+        // E10: flag non-finite positions; non-finite opacity or colors draw
+        // nothing, non-finite draw orders sort as 0.
+        let mut report = NonFinite::default();
+        for frame in &mut out.drawables {
+            let bad = frame.positions.iter().filter(|p| !(p[0].is_finite() && p[1].is_finite())).count();
+            frame.non_finite_vertices = bad;
+            if bad > 0 {
+                report.vertices += bad;
+                report.first_vertex_node.get_or_insert(frame.node);
+            }
+            let mut colors = frame.multiply_color.iter().chain(&frame.screen_color);
+            if !frame.opacity.is_finite() || !colors.all(|c| c.is_finite()) {
+                frame.opacity = 0.0;
+                frame.multiply_color = [0.0; 3];
+                frame.screen_color = [0.0; 3];
+                report.value(frame.node);
+            }
+            if !frame.draw_order.is_finite() {
+                frame.draw_order = 0.0;
+                report.value(frame.node);
+            }
+        }
+        for frame in &mut out.composites {
+            if !frame.opacity.is_finite() {
+                frame.opacity = 0.0;
+                report.value(frame.node);
+            }
+            if !frame.draw_order.is_finite() {
+                frame.draw_order = 0.0;
+                report.value(frame.node);
+            }
+        }
+        out.non_finite = report;
 
         // Scopes (E4): members in pre-order, then a stable sort by draw
         // order, so ties keep tree order.

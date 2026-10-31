@@ -358,3 +358,71 @@ fn webgl2_limits_are_enforced() {
         Err(RenderError::OutputSize { max: 2048, .. })
     ));
 }
+
+/// E10: a vertex that evaluates to infinity removes only the triangles
+/// using it, as a drawable and as a mask source, and the next finite frame
+/// draws everything again.
+#[test]
+fn non_finite_vertices_skip_their_triangles() {
+    use riglet_format::model::{MaskMode, MaskRef};
+    let Some(r) = renderer() else { return };
+    // 4 x 4 canvas, red quad "q" (triangles 0-1-2 top right, 0-2-3 bottom
+    // left), and a green quad on top clipped to q.
+    let scene = |half: bool, overflow: bool| {
+        let mut b = riglet_fixtures::Builder::new();
+        b.model.canvas = riglet_format::model::Canvas { width: 4.0, height: 4.0 };
+        b.param("p", 0.0, 1.0, 0.0);
+        b.texture("red", 1, 1, &[255, 0, 0, 255], false).texture("green", 1, 1, &[0, 255, 0, 255], false);
+        // Off center, so the vertex position the renderer substitutes,
+        // (0, 0), would make the first triangle cover pixels the second
+        // doesn't: drawing it would show.
+        let (lo, hi) = ([-2.0, -2.0], [1.0, 2.0]);
+        let corners = [[lo[0], lo[1]], [hi[0], lo[1]], [hi[0], hi[1]], [lo[0], hi[1]]];
+        let tris: &[u16] = if half { &[0, 2, 3] } else { &[0, 1, 2, 0, 2, 3] };
+        b.mesh("q", "root", "red", &corners, &[[0.5; 2]; 4], tris);
+        if overflow {
+            // Vertex 1 (only in the first triangle): 3e38 + 3e38 = inf.
+            for _ in 0..2 {
+                let kfs =
+                    vec![b.positions(&[[0.0; 2]; 4]), b.positions(&[[0.0; 2], [3.0e38, 0.0], [0.0; 2], [0.0; 2]])];
+                b.set("q", &[riglet_fixtures::linear("p", &[0.0, 1.0])], kfs);
+            }
+        }
+        b.quad("top", "root", "green", lo, hi).set_draw_order("top", 1.0);
+        b.drawable_mut("top").masks = vec![MaskRef { source: "q".into(), mode: MaskMode::Clip }];
+        b
+    };
+    let render = |b: &riglet_fixtures::Builder, p: f32, model: Option<&riglet_render::GpuModel>| {
+        let doc = b.document();
+        let rig = Rig::prepare(&doc, &Limits::default()).unwrap();
+        let mut values = ParamValues::defaults(&rig);
+        assert!(values.set(&rig, "p", [p, 0.0]));
+        let mut out = EvalOutput::new();
+        rig.evaluate(&values, &mut out);
+        let owned;
+        let model = match model {
+            Some(m) => m,
+            None => {
+                owned = r.upload(&doc, &rig).unwrap();
+                &owned
+            }
+        };
+        let options = FrameOptions { scale: 16.0, background: None };
+        (r.render(model, &rig, (4.0, 4.0), &out, &options).unwrap(), out.non_finite)
+    };
+    let (want_half, _) = render(&scene(true, false), 1.0, None);
+    let (want_full, _) = render(&scene(false, false), 1.0, None);
+    assert_ne!(want_half.rgba, want_full.rgba);
+
+    let b = scene(false, true);
+    let doc = b.document();
+    let rig = Rig::prepare(&doc, &Limits::default()).unwrap();
+    let model = r.upload(&doc, &rig).unwrap();
+    let (got, report) = render(&b, 1.0, Some(&model));
+    assert_eq!(report.vertices, 1);
+    assert_eq!(got.rgba, want_half.rgba, "the triangle with the infinite vertex must be skipped");
+    // Back to finite: the skipped triangle is restored.
+    let (got, report) = render(&b, 0.0, Some(&model));
+    assert!(report.is_empty());
+    assert_eq!(got.rgba, want_full.rgba);
+}

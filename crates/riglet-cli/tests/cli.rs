@@ -154,6 +154,32 @@ fn render_writes_a_png() {
     assert_eq!(&image.rgba[0..4], &[0x10, 0x20, 0x30, 255]);
 }
 
+/// E10: keyforms that overflow to infinity still render (exit 0); the CLI
+/// says what was left out.
+#[test]
+fn render_reports_non_finite_vertices() {
+    let dir = scratch("render_non_finite");
+    let mut b = sample();
+    for _ in 0..2 {
+        let kfs = vec![b.positions(&[[0.0; 2]; 4]), b.positions(&[[3.0e38, 0.0]; 4])];
+        b.set("q", &[riglet_fixtures::linear("head_x", &[0.0, 30.0])], kfs);
+    }
+    let file = write(&dir, "m.riglet", &b);
+    let png = dir.join("out.png");
+    let png = png.to_str().unwrap();
+    let Some(out) = render(&["render", &file, "-o", png]) else { return };
+    assert_eq!(code(&out), 0, "{}", text(&out.stderr));
+    assert!(!text(&out.stderr).contains("NaN or infinity"), "{}", text(&out.stderr));
+
+    let out = render(&["render", &file, "-o", png, "-p", "id:head_x=30"]).unwrap();
+    assert_eq!(code(&out), 0, "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("4 vertex position(s) evaluated to NaN or infinity (first in node `q`)"), "{stderr}");
+    // Nothing of the quad is drawn.
+    let image = riglet_render::Image::from_png(&std::fs::read(png).unwrap()).unwrap();
+    assert!(image.rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 0));
+}
+
 #[test]
 fn param_lookup_by_id_name_and_export_id() {
     let dir = scratch("params");

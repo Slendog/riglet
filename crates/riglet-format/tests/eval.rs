@@ -1030,3 +1030,129 @@ fn negative_scale_mirrors_and_keeps_its_sign_near_zero() {
     let x = positions(&rig, &eval(&rig, &[("p", [0.999_999_9, 0.0])]), "d")[0][0];
     assert!(x <= 100.0, "{x}");
 }
+
+// ---------- E10: non-finite results ----------
+
+/// Near f32::MAX: finite (V8), but two of them overflow when added.
+const HUGE: f32 = 3.0e38;
+
+/// Two add sets on `node`, each moving every one of its `n` points by HUGE
+/// in x at p = 1.
+fn overflowing_sets(b: &mut Builder, node: &str, n: usize) {
+    for _ in 0..2 {
+        let kfs = vec![b.positions(&vec![[0.0, 0.0]; n]), b.positions(&vec![[HUGE, 0.0]; n])];
+        b.set(node, &[linear("p", &[0.0, 1.0])], kfs);
+    }
+}
+
+#[track_caller]
+fn assert_flags_vertices(b: &Builder, drawable: &str, count: usize) {
+    let rig = b.rig();
+    let mut out = riglet_format::EvalOutput::new();
+    let mut p = riglet_format::ParamValues::defaults(&rig);
+    rig.evaluate(&p, &mut out);
+    assert!(out.non_finite.is_empty(), "{:?}", out.non_finite);
+    assert_eq!(out.drawables[0].non_finite_vertices, 0);
+
+    assert!(p.set(&rig, "p", [1.0, 0.0]));
+    rig.evaluate(&p, &mut out);
+    let node = rig.node_index(drawable).unwrap();
+    assert_eq!(out.non_finite.vertices, count, "{:?}", out.non_finite);
+    assert_eq!(out.non_finite.first_vertex_node, Some(node));
+    let frame = out.drawable(node).unwrap();
+    assert_eq!(frame.non_finite_vertices, count);
+    assert_eq!(frame.positions.iter().filter(|p| !p[0].is_finite() || !p[1].is_finite()).count(), count);
+    assert!(out.finite_or_flagged());
+
+    // The report is per frame: back at rest everything is finite again.
+    let p = riglet_format::ParamValues::defaults(&rig);
+    rig.evaluate(&p, &mut out);
+    assert!(out.non_finite.is_empty(), "{:?}", out.non_finite);
+    assert_eq!(out.drawable(node).unwrap().non_finite_vertices, 0);
+}
+
+#[test]
+fn overflowing_sets_are_flagged() {
+    let mut b = Builder::new();
+    b.param("p", 0.0, 1.0, 0.0);
+    b.drawable("d", "root", &[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
+    overflowing_sets(&mut b, "d", 3);
+    assert_flags_vertices(&b, "d", 3);
+}
+
+#[test]
+fn overflow_through_a_warp_is_flagged() {
+    let mut b = Builder::new();
+    b.param("p", 0.0, 1.0, 0.0);
+    b.warp("w", "root", 1, 1, &SQUARE);
+    b.drawable("d", "w", &[[0.5, 0.5], [0.25, 0.75]]);
+    overflowing_sets(&mut b, "w", 4);
+    assert_flags_vertices(&b, "d", 2);
+}
+
+#[test]
+fn overflow_through_a_mesh_deformer_is_flagged() {
+    let mut b = Builder::new();
+    b.param("p", 0.0, 1.0, 0.0);
+    let pts = [[0.0, 0.0], [100.0, 0.0], [0.0, 100.0], [100.0, 100.0]];
+    b.mesh_deformer("m", "root", &pts, &[0, 1, 2, 1, 3, 2]);
+    b.drawable("d", "m", &[[25.0, 25.0], [75.0, 75.0]]);
+    overflowing_sets(&mut b, "m", 4);
+    assert_flags_vertices(&b, "d", 2);
+}
+
+#[test]
+fn non_finite_opacity_colors_and_draw_order_are_neutralized() {
+    let mut b = Builder::new();
+    b.param("p", 0.0, 1.0, 0.0);
+    b.composite("c", "root", 1.0, 0.0);
+    b.drawable("a", "c", &[[0.0, 0.0]]).drawable("o", "root", &[[0.0, 0.0]]).drawable("k", "root", &[[0.0, 0.0]]);
+    let huge = |k: Keyform| vec![Keyform::default(), k];
+    // opacity: inf from two add sets, times a multiply factor 0 = NaN.
+    for node in ["a", "c"] {
+        for _ in 0..2 {
+            b.set(node, &[linear("p", &[0.0, 1.0])], huge(Keyform { opacity: Some(HUGE), ..Default::default() }));
+        }
+        let kfs = vec![
+            Keyform { opacity: Some(1.0), ..Default::default() },
+            Keyform { opacity: Some(0.0), ..Default::default() },
+        ];
+        b.set_multiply(node, &[linear("p", &[0.0, 1.0])], kfs);
+    }
+    // multiply color: inf delta times factor 0 = NaN.
+    for _ in 0..2 {
+        b.set(
+            "o",
+            &[linear("p", &[0.0, 1.0])],
+            huge(Keyform { multiply_color: Some([HUGE; 3]), ..Default::default() }),
+        );
+    }
+    let one = Keyform { multiply_color: Some([1.0; 3]), ..Default::default() };
+    b.set_multiply(
+        "o",
+        &[linear("p", &[0.0, 1.0])],
+        vec![one, Keyform { multiply_color: Some([0.0; 3]), ..Default::default() }],
+    );
+    // draw order: inf.
+    for _ in 0..2 {
+        b.set("k", &[linear("p", &[0.0, 1.0])], huge(Keyform { draw_order: Some(HUGE), ..Default::default() }));
+    }
+    let rig = b.rig();
+    let out = eval(&rig, &[("p", [1.0, 0.0])]);
+    let a = out.drawable(rig.node_index("a").unwrap()).unwrap();
+    let o = out.drawable(rig.node_index("o").unwrap()).unwrap();
+    let k = out.drawable(rig.node_index("k").unwrap()).unwrap();
+    // Invisible: opacity and colors 0.
+    assert_eq!((a.opacity, o.opacity, o.multiply_color, o.screen_color), (0.0, 0.0, [0.0; 3], [0.0; 3]));
+    assert_eq!(out.composites[0].opacity, 0.0);
+    // Sorted as 0: ties with "o" (0) and "c" (0) break by pre-order.
+    assert_eq!(k.draw_order, 0.0);
+    assert_eq!(k.opacity, 1.0);
+    // a, o, k (drawables, slot order), then c.
+    assert_eq!(out.non_finite.values, 4, "{:?}", out.non_finite);
+    assert_eq!(out.non_finite.first_value_node, rig.node_index("a"));
+    assert_eq!(out.non_finite.vertices, 0);
+    assert!(out.finite_or_flagged());
+    let order: Vec<usize> = out.in_draw_order().iter().map(|d| d.node).collect();
+    assert_eq!(order, ["a", "o", "k"].map(|n| rig.node_index(n).unwrap()));
+}

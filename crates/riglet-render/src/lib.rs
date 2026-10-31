@@ -276,11 +276,13 @@ impl Renderer {
         let mut ranges = Vec::with_capacity(rig.drawables.len());
         let mut indices: Vec<u32> = Vec::new();
         let mut uvs = Vec::new();
+        let mut vertex_bases = Vec::with_capacity(rig.drawables.len());
         for &node in &rig.drawables {
             let Some(RigKind::Drawable { uvs: u, indices: idx, .. }) = rig.nodes.get(node).map(|n| &n.kind) else {
                 return Err(RenderError::FrameMismatch);
             };
             let base = uvs.len() as u32;
+            vertex_bases.push(base);
             let first = indices.len() as u32;
             indices.extend(idx.iter().map(|&i| base + i));
             uvs.extend_from_slice(u);
@@ -334,10 +336,14 @@ impl Renderer {
             RigKind::Drawable { masks, .. } | RigKind::Group { masks, .. } => !masks.is_empty(),
             _ => false,
         });
+        let patched = std::sync::Mutex::new(vec![false; rig.drawables.len()]);
         Ok(GpuModel {
             textures,
             uvs,
             ranges,
+            indices,
+            vertex_bases,
+            patched,
             vertex_buffer,
             index_buffer,
             uniform_buffer,
@@ -443,6 +449,41 @@ impl Renderer {
         result
     }
 
+    /// E10: rewrites the index range of every drawable with non-finite
+    /// positions so that each triangle using one becomes degenerate (all
+    /// three corners on its first index, which rasterizes nothing), and
+    /// restores drawables that were patched on an earlier frame.
+    fn skip_non_finite_triangles(&self, model: &GpuModel, frame: &EvalOutput) {
+        let Ok(mut patched) = model.patched.lock() else { return };
+        for (slot, d) in frame.drawables.iter().enumerate() {
+            let was = patched.get(slot).copied().unwrap_or(false);
+            let bad = d.non_finite_vertices > 0;
+            if !bad && !was {
+                continue;
+            }
+            let Some(range) = model.ranges.get(slot).cloned() else { continue };
+            let Some(original) = model.indices.get(range.start as usize..range.end as usize) else { continue };
+            let base = model.vertex_bases.get(slot).copied().unwrap_or(0);
+            let finite = |i: u32| {
+                i.checked_sub(base)
+                    .and_then(|k| d.positions.get(k as usize))
+                    .is_some_and(|p| p[0].is_finite() && p[1].is_finite())
+            };
+            let mut data: Vec<u8> = Vec::with_capacity(original.len() * 4);
+            for tri in original.chunks(3) {
+                let keep = !bad || tri.iter().all(|&i| finite(i));
+                for &i in tri {
+                    let i = if keep { i } else { tri.first().copied().unwrap_or(i) };
+                    data.extend_from_slice(&i.to_le_bytes());
+                }
+            }
+            self.queue.write_buffer(&model.index_buffer, u64::from(range.start) * 4, &data);
+            if let Some(p) = patched.get_mut(slot) {
+                *p = bad;
+            }
+        }
+    }
+
     fn render_inner(
         &self,
         model: &GpuModel,
@@ -460,6 +501,9 @@ impl Renderer {
         for d in &frame.drawables {
             for p in &d.positions {
                 let uv = uv_iter.next().copied().unwrap_or([0.0, 0.0]);
+                // E10: a non-finite position is never uploaded; every
+                // triangle using it is skipped below.
+                let p = if p[0].is_finite() && p[1].is_finite() { *p } else { [0.0, 0.0] };
                 for v in [p[0], p[1], uv[0], uv[1]] {
                     interleaved.extend_from_slice(&v.to_le_bytes());
                 }
@@ -468,6 +512,7 @@ impl Renderer {
         if !interleaved.is_empty() {
             self.queue.write_buffer(&model.vertex_buffer, 0, &interleaved);
         }
+        self.skip_non_finite_triangles(model, frame);
 
         let mut uniforms =
             vec![0u8; ((model.drawable_count + model.composite_count).max(1) as u64 * self.draw_stride) as usize];
@@ -633,6 +678,13 @@ pub struct GpuModel {
     uvs: Vec<[f32; 2]>,
     /// Index range per drawable slot.
     ranges: Vec<std::ops::Range<u32>>,
+    /// The uploaded indices, to restore a drawable's triangles after a
+    /// frame that skipped some (E10).
+    indices: Vec<u32>,
+    /// First vertex of each drawable slot in the shared vertex buffer.
+    vertex_bases: Vec<u32>,
+    /// Slots whose uploaded indices currently skip triangles.
+    patched: std::sync::Mutex<Vec<bool>>,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     uniform_buffer: wgpu::Buffer,

@@ -18,6 +18,23 @@ const PNG_1X1: [u8; 70] = [
     0x92, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
 ];
 
+/// E10: evaluates at the defaults and at every parameter's minimum and
+/// maximum (where huge keyforms overflow); the output must be finite or
+/// flagged.
+fn check_eval(rig: &Rig) {
+    let mut out = EvalOutput::new();
+    let mut values = ParamValues::defaults(rig);
+    rig.evaluate(&values, &mut out);
+    assert!(out.finite_or_flagged(), "non-finite output not flagged: {:?}", out.non_finite);
+    for end in [0, 1] {
+        for (v, p) in values.values.iter_mut().zip(&rig.params) {
+            *v = if end == 0 { p.min } else { p.max };
+        }
+        rig.evaluate(&values, &mut out);
+        assert!(out.finite_or_flagged(), "non-finite output not flagged: {:?}", out.non_finite);
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     let Ok(model) = serde_json::from_slice::<Model>(data) else { return };
     let mut files = BTreeMap::new();
@@ -34,6 +51,6 @@ fuzz_target!(|data: &[u8]| {
         files,
     };
     if let Ok(rig) = Rig::prepare(&doc, &Limits::default()) {
-        rig.evaluate(&ParamValues::defaults(&rig), &mut EvalOutput::new());
+        check_eval(&rig);
     }
 });

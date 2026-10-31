@@ -7,6 +7,46 @@ normative text; entries here record the reasoning.
 
 ---
 
+## v0.4.1 — non-finite results (status: ACCEPTED 2026-10-31)
+
+Patch (clarifications only, no new fields): any 0.4.x reader reads any
+0.4.x file. Migration from 0.4.0: none.
+
+Found with an Inochi Creator 0.8.6 export of the Midori sample: 22
+deform bindings and 2 translation bindings under two MeshGroups hold
+deltas of 6e15 to 4e28 px (the `.inx` it came from has none above 1e5).
+They are finite, so the file is valid (V8), and they evaluate to huge
+positions. Values like these can just as well overflow to infinity: two
+sets of 3e38 add up past the f32 range, and a warp or a triangle map of
+infinite points gives NaN. The spec did not say what happens then.
+
+- **E10. Non-finite results.** Evaluation never fails; every output is
+  defined. A non-finite drawable position stays as evaluated and is
+  flagged; renderers drop each triangle that uses one (as a drawable and
+  as a mask source) and never upload it. Non-finite opacity or colors
+  make a drawable invisible (opacity 0, colors 0; a composite draws
+  nothing); a non-finite draw order sorts as 0. Each frame reports the
+  counts and the first node of each kind. Only outputs are checked, not
+  deformer states. R7 gets a one-line cross reference.
+  - Why flag instead of clamping positions: any clamp value (0, the
+    canvas edge) draws a spike somewhere arbitrary; dropping the affected
+    triangles shows that something is missing, and the report says where.
+  - Why opacity 0 rather than 1 or the rest value: there is no
+    meaningful finite value, and invisible is the safe failure (no full
+    screen of a wrong color).
+  - Why draw order 0: keeps the sort a total order with a documented
+    position; the tie-break stays the tree order.
+  - Riglet: `EvalOutput::non_finite` (`NonFinite`: `vertices`,
+    `first_vertex_node`, `values`, `first_value_node`),
+    `DrawableFrame::non_finite_vertices`, `EvalOutput::finite_or_flagged`
+    (used by the `model_json` and `inp_json` fuzz targets, at the defaults
+    and at every parameter's minimum and maximum). The renderer rewrites
+    the affected index ranges to degenerate triangles for that frame and
+    restores them on the next finite one. `riglet render` prints both
+    counts as warnings (exit code unchanged).
+
+---
+
 ## v0.4.0 — Inochi2D-driven additions (status: ACCEPTED S1, S2, S4, 2026-10-27; S5, S6, R2 border and blend group (a) ACCEPTED 2026-10-27 after the M3 import review; S7 ACCEPTED 2026-10-27)
 
 Additive (minor) changes needed for exact Inochi2D import. Migration from

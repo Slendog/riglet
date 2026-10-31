@@ -17,7 +17,7 @@ pub mod model;
 pub mod package;
 pub mod rig;
 
-pub use eval::{CompositeFrame, DrawableFrame, EvalOutput, Member, ParamValues};
+pub use eval::{CompositeFrame, DrawableFrame, EvalOutput, Member, NonFinite, ParamValues};
 pub use limits::Limits;
 pub use package::{Document, PackageError, read_package, read_package_bytes, write_package, write_package_bytes};
 pub use rig::{Issue, Rig, validate};

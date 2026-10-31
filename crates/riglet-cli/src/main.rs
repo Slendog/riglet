@@ -347,6 +347,7 @@ fn render(
     }
     let mut frame = EvalOutput::new();
     rig.evaluate(&values, &mut frame);
+    report_non_finite(&rig, &frame);
 
     let renderer = Renderer::new(RendererOptions { force_software: software, ..Default::default() })
         .map_err(|e| error(e.to_string()))?;
@@ -363,6 +364,29 @@ fn render(
         renderer.adapter().name
     );
     Ok(EXIT_OK)
+}
+
+/// E10: huge keyform values can overflow at some parameter values. The
+/// render still succeeds (exit code 0); say what was left out.
+fn report_non_finite(rig: &Rig, frame: &EvalOutput) {
+    let r = &frame.non_finite;
+    let id = |node: Option<usize>| node.and_then(|n| rig.nodes.get(n)).map_or("?", |n| n.id.as_str());
+    if r.vertices > 0 {
+        eprintln!(
+            "riglet: warning: {} vertex position(s) evaluated to NaN or infinity (first in node `{}`); \
+             the triangles using them are not drawn (spec E10)",
+            r.vertices,
+            id(r.first_vertex_node)
+        );
+    }
+    if r.values > 0 {
+        eprintln!(
+            "riglet: warning: {} opacity, color or draw-order value(s) evaluated to NaN or infinity (first in node \
+             `{}`); drawn as invisible, draw orders sorted as 0 (spec E10)",
+            r.values,
+            id(r.first_value_node)
+        );
+    }
 }
 
 fn print_warnings(

@@ -1,5 +1,5 @@
 /**
- * Riglet Project Format — v0.4.0
+ * Riglet Project Format — v0.4.1
  *
  * Notation: TypeScript types used as a language-neutral spec.
  * The real implementation can be in any language.
@@ -21,7 +21,7 @@
  *
  * Paths inside the package are always relative and "/"-separated.
  *
- * Changes: see docs/format/spec-changes.md (v0.2.0 to v0.4.0).
+ * Changes: see docs/format/spec-changes.md (v0.2.0 to v0.4.1).
  *
  * Versioning policy (schemaVersion is semver):
  *   - patch (0.2.x): clarifications only, no new fields. Any 0.2.x reader
@@ -34,6 +34,9 @@
  *     after a release goes into a new version. Before the first tagged
  *     release, an unreleased version may still be amended in place (as
  *     0.4.0 was, see spec-changes.md).
+ *
+ * Migration 0.4.0 -> 0.4.1: none (patch: E10 defines what evaluation does
+ * when finite values overflow).
  *
  * Migration 0.3.x -> 0.4.0: none (only optional fields and values were
  * added). One evaluation change: a rotation scale that evaluates below 0
@@ -53,7 +56,7 @@ export type RGB = [number, number, number];
 
 export interface Manifest {
   format: "riglet";                // v0.1 files said "rigproj"; migrated on read
-  schemaVersion: string;           // semver, "0.4.0"; see the versioning policy
+  schemaVersion: string;           // semver, "0.4.1"; see the versioning policy
   generator: string;               // app name + version that wrote the file
   provenance: Provenance[];        // import history of this model
 }
@@ -521,6 +524,31 @@ export interface CurveKey {
  *       times are clamped into [t_k, t_k+1] so the curve stays a function of
  *       time.
  *
+ * E10. Non-finite results (0.4.1). A valid file holds only finite numbers
+ *     (V8), but finite values can still overflow while evaluating in 32-bit
+ *     floats: the deltas of several sets add up past the float range, or a
+ *     deformer maps huge points (warp terms, triangle maps). An
+ *     implementation with wider floats may overflow less, but applies the
+ *     same rules to whatever does overflow. Evaluation never fails because
+ *     of it, and every output is defined:
+ *     - A drawable position that evaluates to NaN or infinity stays as
+ *       evaluated and is flagged. Renderers draw nothing for a triangle
+ *       that uses it, as a drawable and as a mask source (R5); its other
+ *       triangles draw as usual. A non-finite position is never passed to
+ *       the GPU.
+ *     - A drawable whose effective opacity, multiplyColor or screenColor
+ *       is not finite is drawn as invisible (opacity 0, colors 0). As a
+ *       mask source it still covers with its finite triangles (R5 ignores
+ *       opacity and colors). A composite whose opacity is not finite draws
+ *       nothing.
+ *     - A non-finite drawOrder sorts as 0 (ties by pre-order, E4).
+ *     - Only outputs are checked (positions, opacity, colors, draw order),
+ *       not intermediate deformer states: an overflow inside a deformer
+ *       shows up in the positions of the drawables below it.
+ *     - Each frame, an implementation reports how many positions and how
+ *       many values were not finite, with the first node of each (drawables
+ *       in slot order, then composites), so the cause can be found.
+ *
  * Non-normative (editor, M4): reparenting needs the inverse warp map.
  * Use Newton iteration on W with the analytic Jacobian, a bounded iteration
  * count, and a fallback (best iterate, or a search over cells) when it does
@@ -652,6 +680,7 @@ export interface CurveKey {
  *       Pixel (0, 0) is the top-left pixel; pixel centers are at +0.5; the
  *       fill rule is wgpu's (top-left).
  *     - No anti-aliasing (no MSAA, no post-process AA).
+ *     - A triangle with a non-finite vertex is not drawn (E10).
  *     - Culling only when drawable.culling is true: triangles that appear
  *       counter-clockwise on screen (+Y down) are discarded (PROVISIONAL).
  *       Otherwise both windings are drawn. The winding is the final one on

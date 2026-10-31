@@ -20,7 +20,7 @@ sidecars).
   wgpu, egui/eframe (editor only), clap (CLI only), cargo-fuzz (dev tool).
   Ask before adding anything else that is large.
 - **Spec:** `docs/format/riglet-format-v0.4.ts` (TypeScript notation,
-  language-neutral; `schemaVersion` "0.3.0", versioning policy in its
+  language-neutral; `schemaVersion` "0.4.1", versioning policy in its
   header). Its Evaluation (E*),
   Validation (V*) and Limits sections are normative; cite rule IDs in code
   comments and tests. Rules marked PROVISIONAL may change after verification.
@@ -265,7 +265,9 @@ commands skip it. Check that it still compiles with
   [--background RRGGBB] [--software]`,
   `riglet import FILE.inp|FILE.inx -o OUT.riglet [--json]`,
   `riglet export FILE.riglet -o OUT.inp|OUT.inx [--json]` (both print every
-  `ConversionWarning`; warnings don't change the exit code).
+  `ConversionWarning`; warnings don't change the exit code). `render`
+  also warns when positions or values evaluate to NaN or infinity (spec
+  E10: those triangles are not drawn); exit code unchanged.
 - **Exit codes (stable):** 0 = OK, 1 = the file is invalid (validation
   issues, not a readable package, or an Inochi2D file that can't be
   imported), 2 = error (I/O, no GPU adapter, bad arguments).
