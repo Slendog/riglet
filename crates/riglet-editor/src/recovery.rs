@@ -356,18 +356,26 @@ fn remove_session_dir(dir: &Path) -> std::io::Result<()> {
 }
 
 fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(path)
+    private_dir_builder().recursive(true).create(path)
 }
 
 fn create_private_dir(path: &Path) -> std::io::Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
+    private_dir_builder().create(path)
+}
+
+/// Owner-only folders on Unix; on Windows the per-user data folder's
+/// permissions are inherited.
+fn private_dir_builder() -> std::fs::DirBuilder {
     #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(path)
+    {
+        let mut builder = std::fs::DirBuilder::new();
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::DirBuilder::new()
+    }
 }
 
 /// The last autosave's outcome, for the status bar.
