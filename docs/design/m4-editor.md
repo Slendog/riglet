@@ -1,171 +1,210 @@
-# M4 design: minimal editor (PROPOSAL, for review)
+# M4 design: editor
 
-Status: PROPOSAL 2026-10-31. Nothing implemented yet. Section 9 lists the
-decisions needed before starting.
+Status: APPROVED 2026-10-31 (decisions in section 10). M4a in progress.
 
 M4 in CLAUDE.md: "Minimal editor: viewport, node tree, parameter sliders,
-live preview." This document proposes what that means, how it fits the
+live preview." This document says what that means, how it fits the
 existing crates, and how it is tested.
 
-## 1. Scope
+## 1. Phases
 
-In M4:
+- **M4a: viewer and basic editing.** Everything in sections 2 to 9. The
+  editing operations are few (section 5), but they go through the same
+  command and undo machinery that M4b extends.
+- **M4b: mesh and keyform editing.** Selecting and moving vertices,
+  editing a keyform's deltas at the current parameter values, adding and
+  removing keyforms, deformer parenting. Builds on M4a's commands, history
+  and dirty tracking; designed in its own document before it starts.
+- **M4c: PSD and KRA import.** Layers to drawables with an auto-mesh,
+  through `riglet-psd`; designed in its own document. Every importer gets
+  a fuzz target, as always.
+- **Not in M4:** physics and motion playback move to M5 together (both
+  are time-stepped; the E9 motion evaluator is written there).
 
-- **Open** `.riglet`, `.inp` and `.inx` (through `riglet-inochi2d`, with the
-  import warnings shown in a panel). **Save** as `.riglet`; Inochi2D export
-  as in the CLI (warnings shown).
+## 2. M4a scope
+
+- **Open** `.riglet`, `.inp` and `.inx` (through `riglet-inochi2d`, with
+  the import warnings in the warnings panel). **Save** as `.riglet`;
+  **Export** to Inochi2D as in the CLI (export warnings in the panel).
 - **Viewport:** the model rendered live by `riglet-render` (the same
   pipelines and target format as the CLI, spec R1), with pan, zoom, fit to
-  window and a background color choice (transparent checkerboard or a
-  solid color).
-- **Node tree:** the model's hierarchy with type icons, names and
-  visibility. Selecting a drawable outlines its evaluated mesh in the
-  viewport. A per-session "solo/hide in view" toggle that does not change
-  the model.
+  window and a background choice (transparent checkerboard or a solid
+  color).
+- **Node tree:** hierarchy with type icons, names and the model's
+  `visible` flag. Selecting a drawable outlines its evaluated mesh in the
+  viewport. A per-session "hide in view" toggle that is view-only (section
+  4).
 - **Parameters:** a slider per 1D parameter, a 2D pad per 2D parameter,
   grouped by `Parameter.group`, each with "reset to default" and "reset
-  all". The preview updates while dragging.
-- **Status:** adapter name, frame time, and the E10 report (non-finite
-  positions or values, with the first node, clickable to select it).
-- **Info panel:** canvas, counts, provenance and conversion warnings.
+  all". The preview updates while dragging. Moving a slider is not an edit
+  (parameter values are view state, not model data).
+- **Warnings panel:** section 7.
+- **Status bar:** adapter name, frame time, dirty marker, autosave state.
+- **Info panel:** canvas, counts, provenance.
 
-Not in M4 (later milestones): editing geometry, keyforms, deformers or
-masks; undo/redo (nothing edits the model yet, except saving); physics
-(M5); motions playback (could come cheaply after M4: E9 is implemented
-nowhere yet, so it needs its own evaluator piece); PSD import; the web
-build.
+## 3. Crates and dependencies
 
-## 2. Crates and dependencies
-
-- New crate `crates/riglet-editor`, binary `riglet-editor`. Depends on
-  `riglet-format`, `riglet-render`, `riglet-inochi2d`, `eframe` (approved
-  in CLAUDE.md) and `pollster` (already used).
+- New crate `crates/riglet-editor`, binary `riglet-editor`. Library part
+  (`EditorState`, commands, history, saving, recovery) has no egui types
+  and is tested without a window; the binary part is the egui UI.
+  Depends on `riglet-format`, `riglet-render`, `riglet-inochi2d`,
+  `eframe` and `pollster` (already used).
 - `eframe 0.37` with the `wgpu` backend (not `glow`): it depends on
   `wgpu ^30.0`, the version the workspace already pins, so editor and
   renderer share one wgpu. Features: `wgpu`, `x11`, `wayland`,
-  `default_fonts`, `clipboard` (clipboard comes with eframe through
-  `arboard`/`smithay-clipboard`, no separate dependency), `accesskit`.
-- **Native file dialogs: needs a decision** (section 9). Candidate: `rfd`
-  (cross-platform; on Linux it can use the XDG portal, so no GTK
-  dependency). Without it, M4 uses an in-app path field plus drag and drop
-  of files onto the window (both built into eframe).
+  `default_fonts`, `accesskit`. Clipboard comes with eframe.
+- `rfd` for native file dialogs, with the `xdg-portal` backend on Linux
+  (no GTK dependency). Drag and drop of files onto the window also works.
 - Dependency direction stays as in CLAUDE.md: only the editor depends on
   egui.
 
-## 3. Rendering in the editor
+## 4. Rendering and view state
 
-The editor must use the renderer's code path (R1), but today `Renderer`
-creates its own wgpu device and always reads the image back to the CPU.
-Proposed API changes in `riglet-render` (small, additive):
+The editor uses the renderer's code path (R1). Changes in `riglet-render`
+(small, additive):
 
-1. `Renderer::from_device(device, queue, adapter_info, options)`: wraps
-   an existing device (eframe's), so the viewport texture lives on the
-   same device as egui. `Renderer::new` keeps creating its own.
-2. `Renderer::render_to(&model, &rig, canvas, &frame, &options, target)`:
-   renders into a caller-owned `Rgba8Unorm` texture (no readback).
-   `render` becomes `render_to` into its own target plus the existing
-   readback, so the goldens keep covering the exact code the editor uses.
-3. `FrameOptions` gains a view transform: output size in pixels, scale
-   and a pan offset in model units. The CLI passes no offset, which gives
-   R7's centered mapping exactly. R7 stays the rule for exported images;
-   the offset is an editor convenience (non-normative, noted in R7).
+1. `Renderer::from_device(adapter, device, queue, options)`: wraps an
+   existing device (eframe's), so the viewport texture lives on the same
+   device as egui. `Renderer::new` creates its own device and then calls
+   the same constructor.
+2. `Renderer::render_to(&gpu, &output, &frame, target)`: renders into a
+   caller-owned texture (no readback). `render` is `render_to` into its
+   own target plus the existing readback. The CLI and the goldens go
+   through `render`, so they cover the exact code the editor uses, and
+   every golden stays byte-identical (checked before the change lands).
+3. `FrameOptions` gains a view transform: zoom and pan, applied only in
+   the final clip-space mapping of the shaders. It never touches model
+   coordinates, `EvalOutput` or evaluation. The default (zoom 1, no pan)
+   gives R7's mapping exactly; R7 stays the rule for exported images and
+   gets a non-normative note.
 
-The viewport texture is registered with `egui_wgpu::Renderer::
-register_native_texture` and re-rendered only when something changed
-(parameter, view, model, window size), not every frame.
-
-Budgets still apply: the viewport size is capped by
-`Budgets::max_output_dimension` and the adapter's limits, and errors show
-in the status bar instead of panicking.
+The viewport texture is registered with egui-wgpu and re-rendered only
+when something changed (parameter, view, model, window size). Budgets
+still apply: the viewport size is capped by `Budgets::max_output_dimension`
+and the adapter's limits; errors show in the status bar.
 
 Selection outlines and the mesh wireframe are drawn with egui's painter
-from `EvalOutput` positions, on top of the texture. That needs no
-renderer change and no extra GPU pipeline, and skips non-finite points
-(E10).
+from `EvalOutput` positions, skipping non-finite points (E10).
 
-## 4. State and threading
+**View-only state** (zoom, pan, background, hide-in-view toggles,
+selection, panel layout, parameter values) lives in memory only. It never
+modifies the `Document`, so it never marks it dirty and never changes what
+is saved. M4 writes no `editor.json`. Every package entry the editor does
+not own, including another tool's `editor.json`, is kept verbatim on save
+(`Document::files`), with a test.
 
-- `EditorState` (no egui types): the loaded `Document`, `Rig`,
-  `ParamValues`, one reused `EvalOutput`, selection, view, and the
-  warnings list. All model logic lives here so it can be unit tested
-  without a window.
-- The UI layer reads `EditorState` and sends actions (`SetParam`,
-  `Select`, `Open(path)`, `Save(path)`, `ResetParams`, ...). This keeps
-  M4 simple and gives undo/redo a natural place later.
-- **Loading runs on a background thread** (`std::thread`), so a large or
-  hostile file never freezes the window; the UI shows "loading" and
-  stays usable. Loads use the same `Limits` as the CLI. A failure shows
-  the error (and validation issues) in a dialog and keeps the previous
-  model open.
-- Evaluation runs on the UI thread on demand (only when a parameter
-  changes). Measured on Aka/Midori before committing to that; if it is
-  too slow for 60 fps while dragging, evaluation moves to a worker.
-- The renderer's `GpuModel` is rebuilt only on load.
+## 5. Document, commands and undo/redo
 
-## 5. Untrusted input
+- `EditorState` holds the loaded `Document`, its `Rig`, the source path
+  and kind (`.riglet`, `.inp`, `.inx`), `ParamValues`, one reused
+  `EvalOutput`, view state, warnings and the `History`.
+- Every change to the `Document` is a `Command` applied through
+  `EditorState::apply`. A command returns its inverse, and `History`
+  keeps undo and redo stacks of them. A new command clears the redo stack.
+  Consecutive commands of the same kind on the same target (typing a name)
+  coalesce into one undo step.
+- After a command the document is validated and the rig rebuilt; if that
+  fails, the command is undone at once and its error shown, so an invalid
+  model is never kept. (M4a's commands cannot produce one; M4b's can.)
+- History memory is capped (count and bytes); the oldest steps drop
+  first.
+- Dirty tracking compares the history position with the position at the
+  last save, so undoing back to the saved state clears the dirty marker.
+- M4a commands: `RenameNode`, `SetNodeVisible` (the model's flag, not the
+  view-only toggle), `RenameParameter`, `SetParameterGroup`,
+  `SetParameterDefault` (current values become the default).
+- All of it is plain Rust and tested without the UI: apply, undo, redo,
+  coalescing, the cap, dirty tracking, rejection of invalid results.
 
-Same rules as everywhere: the editor opens files from anywhere.
+## 6. Loading, saving and recovery
 
-- Every load goes through the existing parsers, validators and limits.
-  No `unwrap` on file data; no panics (the workspace lints already deny
-  them in library code; the editor follows the same lints).
-- Dropped files are treated exactly like opened ones.
-- Names from files (node and parameter names) are shown as plain text,
-  never interpreted (egui labels don't parse markup).
-- Saving writes to a temporary file next to the target and renames it
-  into place, so a failed save never destroys the original.
+- **Loading** runs on a background thread, so a large or hostile file
+  never freezes the window. It uses the CLI's `Limits`. A failure shows the
+  error (and validation issues) and keeps the current model.
+- **Saving** is atomic: write to a temporary file in the target's
+  directory, flush and sync it, then rename it over the target (on
+  Windows a replace-rename). A failed save leaves the original untouched
+  and removes the temporary file.
+- **Imported files are never overwritten without asking.** A model opened
+  from `.inp`/`.inx` has no save path: Save acts as Save As and proposes a
+  `.riglet` next to it. Export to Inochi2D asks before replacing an
+  existing file, and always asks (with the file named) when the target is
+  the file the model was imported from.
+- **Autosave and crash recovery:** while the document is dirty, a
+  recovery copy is written every 60 seconds (atomically, as a `.riglet`)
+  to the editor's data directory, with a small JSON record of the
+  original path and time. A clean save or a clean close removes it. At
+  start, existing recovery copies are offered: restore (opens as a new,
+  dirty document with the original path remembered) or discard. Recovery
+  files are read through the same parsers and limits as any other file.
+  Autosave never writes over the user's file.
+- Closing or opening another file with unsaved changes asks first.
 
-## 6. Platforms
+## 7. Warnings panel
 
-- Builds on all six CI runners (Linux x86_64/arm64 with X11 and Wayland,
-  macOS arm64/Intel, Windows x86_64/arm64). CI builds and runs the
-  editor's tests; it doesn't open a window.
-- Linux: winit's X11 and Wayland backends load their system libraries at
-  run time, so building needs no extra packages; to verify on the CI
-  images when the crate is added.
-- HiDPI: the viewport renders at physical pixels (`pixels_per_point`),
-  so the preview is sharp on Retina and scaled Windows displays.
+One list, grouped by source:
 
-## 7. Tests
+- **Import:** the `ConversionWarning`s from the import that produced the
+  model, plus those recorded in `manifest.provenance`.
+- **Export:** the warnings of the last export.
+- **Evaluation (live):** the E10 report of the current frame (non-finite
+  vertex positions or values, with the first node), updated as parameters
+  change.
 
-- **State layer:** unit tests on `EditorState` with Builder models and
-  synthetic Inochi2D puppets: open, parameter changes, reset, selection,
-  save then reopen gives an equal `Document`, a failed load keeps the
-  previous model, hostile files give errors.
-- **Rendering:** a render test that `render_to` plus readback equals
-  `render` exactly (same adapter), and the goldens unchanged.
-- **View transform:** pixel mapping tests (no offset equals R7; an
-  offset moves the image by the expected pixels).
-- **Startup smoke test:** not in CI (no display). Manual check list in
-  the M4 report: open Aka and Midori, drag `Head:: Yaw-Pitch`, compare
-  with the CLI render at the same values.
-- UI-level automated tests (for example with `egui_kittest`) would need
-  another dependency; not proposed for M4.
+Each entry shows its code and message; entries with an `object_id` (or an
+E10 first node) are links that select the node in the tree and the
+viewport. Codes are filterable. Names from files are shown as plain text.
 
-## 8. Plan (small commits, each passing CI)
+## 8. Untrusted input
+
+- Every load goes through the existing parsers, validators and limits. No
+  `unwrap` on file data; the editor follows the workspace lints.
+- Dropped files and recovery files are treated exactly like opened ones.
+- Names from files are shown as plain text, never interpreted.
+
+## 9. Platforms and tests
+
+- Builds on all six CI runners. CI builds and runs the editor's library
+  tests; it does not open a window. Linux: winit loads X11 and Wayland at
+  run time; the portal backend of `rfd` needs no system packages to build
+  (checked when the crate lands).
+- HiDPI: the viewport renders at physical pixels.
+- Tests:
+  - Renderer: `render_to` plus readback equals `render`; goldens unchanged;
+    the view transform at its default equals R7; zoom and pan move the
+    image by the expected pixels; evaluation output does not depend on the
+    view.
+  - State: open, parameter changes, reset, selection, commands and
+    history (section 5), save then reopen gives an equal `Document`,
+    unknown entries and `editor.json` preserved, a failed load keeps the
+    previous model, hostile files give errors, view state never marks the
+    document dirty.
+  - Saving: atomic replace, failure leaves the original, imported sources
+    are never a save target, recovery write, list, restore and discard.
+  - Startup smoke test: manual (no display in CI). Checklist in the M4a
+    report.
+
+## 10. Decisions (2026-10-31)
+
+1. `rfd` approved, `xdg-portal` backend on Linux.
+2. Renderer API approved on two conditions: goldens byte-identical (the
+   CLI goes through the new path), and the view transform never touches
+   model coordinates or evaluation.
+3. No `editor.json` in M4; view-only state in memory only; unknown entries
+   (including another tool's `editor.json`) preserved.
+4. Motion playback moves to M5 with physics; the E9 evaluator is written
+   there.
+
+## 11. Plan (small commits, each passing CI)
 
 1. `riglet-render`: `from_device`, `render_to`, view transform, with
-   tests. No editor yet.
-2. `riglet-editor` crate: window, open `.riglet`, viewport with pan and
-   zoom, fit to window.
-3. Parameter panel (sliders, 2D pads, groups, reset).
-4. Node tree, selection outline, view-only hide/solo.
-5. Inochi2D open/export, warnings and info panels, E10 status.
-6. Save (atomic), background loading, error dialogs.
-7. Native dialogs, if approved.
+   tests. **Review stop.**
+2. `riglet-editor` library: `EditorState`, commands, history, dirty
+   tracking, atomic save, preservation tests.
+3. Editor binary: window, open `.riglet` (background load), viewport with
+   pan, zoom and fit.
+4. Parameter panel; node tree, selection outline, hide-in-view.
+5. Inochi2D open and export, the warnings panel, E10 live entries.
+6. Autosave and recovery; unsaved-changes prompts; `rfd` dialogs.
 
-Stop for review after 8.1 (renderer API) and at the end.
-
-## 9. Decisions needed
-
-1. **Native file dialogs:** add `rfd`, or M4 with a path field and drag
-   and drop only?
-2. **Renderer API changes in section 3** (`from_device`, `render_to`,
-   view transform in `FrameOptions`, and a non-normative note in R7):
-   OK?
-3. **Editor-only state:** the spec reserves `editor.json` in packages.
-   Proposal: M4 does not write it (the view and the selection are not
-   saved), so saving changes nothing but what the user changed. Defining
-   `editor.json` waits until there is state worth keeping.
-4. **Motions playback** in M4 or later? It needs an E9 evaluator (curves
-   are stored but not evaluated anywhere yet).
+**Review stop** at the end of M4a, with the manual checklist.
