@@ -293,7 +293,8 @@ narrows the list. Names from files are shown as plain text.
 2026-10-31 on the step 4 build (`f3a2770`): items 1, 2, 5, 6 and 7 passed
 (the editor's gray ramp at 100% matched the CLI's PNG; posing, parameter
 and node editing, undo/redo; Windows scaling at 125% and 150%). Items 3
-and 4 were not reported separately.
+and 4 were not reported separately. On 2026-11-07, on `5701df4`: items
+3, 4, 8 and 9 passed; item 10 is explained there.
 
 1. **[passed 2026-10-31]** `cargo run -p riglet-cli -- render tests/fixtures/gray-ramp.riglet -o
    ramp.png` and open `ramp.png` in an image viewer at 100%.
@@ -302,9 +303,9 @@ and 4 were not reported separately.
    viewer's: equal steps, no washed-out darks (an extra gamma decode) or
    crushed darks (an extra encode). The alpha row over the checkerboard
    must fade evenly from invisible to white.
-3. Drag to pan, scroll or pinch to zoom about the cursor, `F` to fit.
+3. **[passed 2026-11-07]** Drag to pan, scroll or pinch to zoom about the cursor, `F` to fit.
    Resize the window: the ramp stays sharp (no blur at 100%).
-4. Open Aka and Midori (`.inp`, `.inx`): loading shows a spinner and the
+4. **[passed 2026-11-07]** Open Aka and Midori (`.inp`, `.inx`): loading shows a spinner and the
    window stays responsive; Save asks for a `.riglet` and never offers the
    imported file. Open another file while one loads: only the last one
    opens.
@@ -318,11 +319,11 @@ and 4 were not reported separately.
    (an undoable edit). Undo and redo everything above.
 7. **[passed 2026-10-31]** Windows at 125% and 150% display scaling: the gray ramp at actual size
    is sharp, with no blurred or doubled rows.
-8. Open Midori.inp: the warnings panel opens with 55 import warnings,
+8. **[passed 2026-11-07]** Open Midori.inp: the warnings panel opens with 55 import warnings,
    every one linked to a node (none "no longer in the model"). Click one
    deep in the tree: the node is selected, outlined, and the tree
    expands and scrolls to it. Filter by `MESH_EMPTY`.
-9. File > Export to Inochi2D: export Midori over `Midori.inp` itself: a
+9. **[passed 2026-11-07]** File > Export to Inochi2D: export Midori over `Midori.inp` itself: a
    dialog names the file before anything is written; Cancel leaves it
    untouched. Export to a new `.inp`: the status bar reports the warning
    count and the panel shows a "Last export" group. Open the export in
@@ -330,6 +331,16 @@ and 4 were not reported separately.
 10. Drag `Head:: Yaw-Pitch` on Midori.inp to a corner: if the broken
     Creator values overflow, a live E10 entry appears and goes away when
     the pad returns to the center, without flickering.
+    **[2026-11-07: no E10 entry; hair and face stretch into long streaks
+    off the canvas.]** This comes from the file: Midori's `Head:: Yaw-Pitch`
+    keyforms hold `deform` deltas up to about 1.5e20 px on 20 nodes
+    (`DEFORM_OUT_OF_RANGE` import warnings, listed in the panel). Those are
+    finite in f32 (the limit is about 3.4e38), so nothing overflows and E10
+    stays silent; the triangles are drawn reaching far off the canvas.
+    `meshgroup_error` shows Riglet matching the test port of Inochi2D's
+    vertex pipeline on everything else (max 0.6 px), and the port reaches
+    the same huge values there. Open: confirm the same streaks in Inochi
+    Creator or Session with the original `Midori.inp` at that pose.
 11. Autosave: open Aka.inp (an import is unsaved from the start), wait
     over a minute: the status bar says "autosaved" (hover shows the
     folder). Force-quit the editor (Activity Monitor, Task Manager or
